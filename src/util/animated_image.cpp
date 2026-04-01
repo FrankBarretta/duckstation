@@ -12,7 +12,17 @@
 #include "common/scoped_guard.h"
 #include "common/string_util.h"
 
+#if __has_include(<libpng16/png.h>)
+#include <libpng16/png.h>
+#else
 #include <png.h>
+#endif
+
+#if defined(PNG_APNG_SUPPORTED) && defined(PNG_READ_APNG_SUPPORTED) && defined(PNG_WRITE_APNG_SUPPORTED)
+#define HAS_PNG_APNG 1
+#else
+#define HAS_PNG_APNG 0
+#endif
 
 // clang-format off
 #ifdef _MSC_VER
@@ -304,7 +314,11 @@ static bool PNGCommonLoader(AnimatedImage* image, png_structp png_ptr, png_infop
 
   const u32 width = png_get_image_width(png_ptr, info_ptr);
   const u32 height = png_get_image_height(png_ptr, info_ptr);
+#if HAS_PNG_APNG
   const u32 num_frames = png_get_num_frames(png_ptr, info_ptr);
+#else
+  const u32 num_frames = 1;
+#endif
   const png_byte color_type = png_get_color_type(png_ptr, info_ptr);
   const png_byte bit_depth = png_get_bit_depth(png_ptr, info_ptr);
 
@@ -338,6 +352,7 @@ static bool PNGCommonLoader(AnimatedImage* image, png_structp png_ptr, png_infop
 
   DebugAssert(num_frames > 0);
   image->Resize(width, height, num_frames, {1, 10}, false);
+#if HAS_PNG_APNG
   if (num_frames > 1)
   {
     for (u32 i = 0; i < num_frames; i++)
@@ -363,6 +378,7 @@ static bool PNGCommonLoader(AnimatedImage* image, png_structp png_ptr, png_infop
     }
   }
   else
+#endif
   {
     const int num_passes = png_set_interlace_handling(png_ptr);
     for (int pass = 0; pass < num_passes; pass++)
@@ -467,6 +483,7 @@ static void PNGSaveCommon(const AnimatedImage& image, png_structp png_ptr, png_i
   const u32 width = image.GetWidth();
   const u32 height = image.GetHeight();
   const u32 frames = image.GetFrames();
+#if HAS_PNG_APNG
   if (frames > 1)
   {
     if (!png_set_acTL(png_ptr, info_ptr, frames, 0))
@@ -487,6 +504,12 @@ static void PNGSaveCommon(const AnimatedImage& image, png_structp png_ptr, png_i
     }
   }
   else
+#else
+  if (frames > 1)
+  {
+    png_error(png_ptr, "libpng was built without APNG support");
+  }
+#endif
   {
     // only one frame
     png_write_info(png_ptr, info_ptr);

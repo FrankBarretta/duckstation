@@ -210,7 +210,7 @@ foreach(src ${SRCS})
     list(APPEND UI_FILES ${src})
   endif()
 endforeach()
-qt_wrap_ui(UI_SRCS SOURCES ${UI_FILES})
+qt_wrap_ui(UI_SRCS ${UI_FILES})
 target_sources(duckstation-qt PRIVATE ${UI_SRCS})
 target_include_directories(duckstation-qt PRIVATE "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>")
 
@@ -232,10 +232,11 @@ if(WIN32)
   get_target_property(MOC_EXECUTABLE_LOCATION Qt6::moc IMPORTED_LOCATION)
   get_filename_component(QT_BINARY_DIRECTORY "${MOC_EXECUTABLE_LOCATION}" DIRECTORY)
   find_program(WINDEPLOYQT_EXE windeployqt HINTS "${QT_BINARY_DIRECTORY}")
+  set(QT_OUTPUT_DIR "$<TARGET_FILE_DIR:duckstation-qt>")
   add_custom_command(TARGET duckstation-qt POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E env PATH="${QT_BINARY_DIRECTORY}"
-            "${WINDEPLOYQT_EXE}" --libdir="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
-                                 --plugindir="${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/QtPlugins"
+            "${WINDEPLOYQT_EXE}" --libdir="${QT_OUTPUT_DIR}"
+                                 --plugindir="${QT_OUTPUT_DIR}/QtPlugins"
                                  $<IF:$<CONFIG:Debug>,--debug,--release>
                                  --no-compiler-runtime
                                  --no-system-d3d-compiler
@@ -244,7 +245,7 @@ if(WIN32)
                                  "$<TARGET_FILE:duckstation-qt>"
   )
   add_custom_command(TARGET duckstation-qt POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/qt.conf"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf.win" "${QT_OUTPUT_DIR}/qt.conf"
   )
   #set_source_files_properties(${TS_FILES} PROPERTIES OUTPUT_LOCATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/translations")
 
@@ -255,13 +256,13 @@ if(WIN32)
     list(APPEND DEP_BINS "${CMAKE_PREFIX_PATH}/bin/${DEP}")
   endforeach()
   add_custom_command(TARGET duckstation-qt POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEP_BINS} "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEP_BINS} "${QT_OUTPUT_DIR}"
   )
   if(CMAKE_BUILD_TYPE MATCHES "Debug|Devel")
     get_property(WINPIXEVENTRUNTIME_DLL TARGET WinPixEventRuntime::WinPixEventRuntime PROPERTY IMPORTED_LOCATION)
     message(STATUS WP "${WINPIXEVENTRUNTIME_DLL}")
     add_custom_command(TARGET duckstation-qt POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${WINPIXEVENTRUNTIME_DLL}" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${WINPIXEVENTRUNTIME_DLL}" "${QT_OUTPUT_DIR}"
     )
   endif()
 elseif(APPLE)
@@ -303,6 +304,10 @@ if(NOT APPLE)
   # Need to ensure the resources directory exists, it might not. Happens when low CPU count and parallel builds.
   add_custom_target(duckstation-qt-rcc-mkdir COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/resources")
   add_dependencies(duckstation-qt-rcc duckstation-qt-rcc-mkdir)
+  add_custom_command(TARGET duckstation-qt POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:duckstation-qt>/resources"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RCC_FILE}" "$<TARGET_FILE_DIR:duckstation-qt>/resources/duckstation-qt.rcc"
+  )
 else()
   set(RCC_FILE "${CMAKE_CURRENT_BINARY_DIR}/duckstation-qt.rcc")
   qt_add_binary_resources(duckstation-qt-rcc resources/duckstation-qt.qrc DESTINATION ${RCC_FILE} OPTIONS -no-compress)

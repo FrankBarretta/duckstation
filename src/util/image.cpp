@@ -19,7 +19,11 @@
 
 #include <jpeglib.h>
 #include <plutosvg.h>
+#if __has_include(<libpng16/png.h>)
+#include <libpng16/png.h>
+#else
 #include <png.h>
+#endif
 #include <webp/decode.h>
 #include <webp/encode.h>
 
