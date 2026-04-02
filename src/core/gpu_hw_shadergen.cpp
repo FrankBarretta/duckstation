@@ -220,7 +220,7 @@ std::string GPU_HW_ShaderGen::GenerateBatchVertexShader(bool upscaled, bool msaa
         int texpage_lo = int(max(a_texpage.x + 0.5, 0.0));
         int texpage_hi = int(max(a_texpage.y + 0.5, 0.0));
         v_texpage.x = (texpage_lo % 16) * 64;
-        v_texpage.y = (texpage_lo / 16) * 256;
+        v_texpage.y = ((texpage_lo / 16) % 2) * 256;
       #else
         v_texpage.x = (a_texpage & 15u) * 64u;
         v_texpage.y = ((a_texpage >> 4) & 1u) * 256u;
@@ -1891,6 +1891,13 @@ std::string GPU_HW_ShaderGen::GenerateVRAMExtractFragmentShader(u32 resolution_s
   if (depth_buffer)
     DeclareTexture(ss, "samp1", 1, msaa);
 
+  // For D3D9 LOAD_TEXTURE normalization
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    ss << "CONSTANT float2 RCP_VRAM_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << "u * RESOLUTION_SCALE), "
+       << "1.0 / float(" << VRAM_HEIGHT << "u * RESOLUTION_SCALE));\n";
+  }
+
   ss << R"(
 float4 LoadVRAM(int2 coords)
 {
@@ -1900,6 +1907,8 @@ float4 LoadVRAM(int2 coords)
     value += LOAD_TEXTURE_MS(samp0, coords, sample_index);
   value /= float(MULTISAMPLES);
   return value;
+#elif API_D3D9
+  return SAMPLE_TEXTURE_LEVEL(samp0, (float2(coords) + float2(0.5, 0.5)) * RCP_VRAM_TEXTURE_SIZE, 0.0);
 #else
   return LOAD_TEXTURE(samp0, coords, 0);
 #endif
@@ -1915,6 +1924,8 @@ float LoadDepth(int2 coords)
     value += LOAD_TEXTURE_MS(samp1, coords, sample_index).r;
   value /= float(MULTISAMPLES);
   return value;
+#elif API_D3D9
+  return SAMPLE_TEXTURE_LEVEL(samp1, (float2(coords) + float2(0.5, 0.5)) * RCP_VRAM_TEXTURE_SIZE, 0.0).r;
 #else
   return LOAD_TEXTURE(samp1, coords, 0).r;
 #endif
@@ -2601,6 +2612,13 @@ std::string GPU_HW_ShaderGen::GenerateBoxSampleDownsampleFragmentShader(u32 fact
 
   ss << "CONSTANT uint FACTOR = " << factor << "u;\n";
 
+  // For D3D9 LOAD_TEXTURE normalization
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    ss << "CONSTANT float2 RCP_SRC_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << "u * FACTOR), "
+       << "1.0 / float(" << VRAM_HEIGHT << "u * FACTOR));\n";
+  }
+
   DeclareFragmentEntryPoint(ss, 0, 1, {}, true);
   ss << R"(
 {
@@ -2609,7 +2627,11 @@ std::string GPU_HW_ShaderGen::GenerateBoxSampleDownsampleFragmentShader(u32 fact
   for (uint offset_x = 0u; offset_x < FACTOR; offset_x++)
   {
     for (uint offset_y = 0u; offset_y < FACTOR; offset_y++)
+#if API_D3D9
+      color += SAMPLE_TEXTURE_LEVEL(samp0, (float2(base_coords + uint2(offset_x, offset_y)) + float2(0.5, 0.5)) * RCP_SRC_TEXTURE_SIZE, 0.0).rgb;
+#else
       color += LOAD_TEXTURE(samp0, int2(base_coords + uint2(offset_x, offset_y)), 0).rgb;
+#endif
   }
   color /= float(FACTOR * FACTOR);
   o_col0 = float4(color, 1.0);
