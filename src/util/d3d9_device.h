@@ -8,6 +8,7 @@
 #include "common/windows_headers.h"
 
 #include <d3d9.h>
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -290,9 +291,12 @@ private:
   std::vector<u8> m_uniform_buffer_data;
   u32 m_vertex_buffer_size = 0;
   u32 m_index_buffer_size = 0;
+  u32 m_max_render_targets = 1;
+  u32 m_num_current_render_targets = 0;
   u32 m_vertex_buffer_position = 0;
   u32 m_index_buffer_position = 0;
   u32 m_current_base_vertex = 0;
   u32 m_current_base_index = 0;
+  std::array<D3D9Texture*, MAX_TEXTURE_SAMPLERS> m_current_textures = {};
   D3D9Pipeline* m_current_pipeline = nullptr;
 };

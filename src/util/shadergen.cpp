@@ -469,12 +469,92 @@ void ShaderGen::DeclareUniformBuffer(std::stringstream& ss, const std::initializ
 {
   if (!m_glsl && m_render_api == RenderAPI::D3D9)
   {
-    u32 register_index = push_constant ? 32u : 0u;
+    // D3D9: Pack variables into float4 constant registers matching C++ struct byte layout.
+    // In SM3.0, constant registers are float4, so all types (uint, bool, int) map to float.
+    // The C++ side must convert uint/bool values to float before uploading.
+    const u32 base_register = push_constant ? 32u : 0u;
+
+    struct VarInfo
+    {
+      std::string name;
+      u32 reg;
+      u32 start_comp;
+      u32 num_comp;
+      bool is_bool;
+    };
+
+    u32 byte_offset = 0;
+    std::vector<VarInfo> vars;
+
     for (const char* member : members)
     {
-      ss << member << " : register(c" << register_index << ");\n";
-      register_index += GetD3D9RegisterCountForType(member);
+      const char* space = std::strchr(member, ' ');
+      if (!space)
+        continue;
+
+      const std::string type(member, static_cast<size_t>(space - member));
+      const std::string name(space + 1);
+
+      u32 num_comp = 1;
+      bool is_bool = false;
+
+      if (type == "float" || type == "uint" || type == "int")
+        num_comp = 1;
+      else if (type == "float2" || type == "uint2" || type == "int2")
+        num_comp = 2;
+      else if (type == "float3" || type == "uint3" || type == "int3")
+        num_comp = 3;
+      else if (type == "float4" || type == "uint4" || type == "int4")
+        num_comp = 4;
+      else if (type == "bool")
+      {
+        num_comp = 1;
+        is_bool = true;
+      }
+
+      const u32 reg = byte_offset / 16;
+      const u32 comp = (byte_offset % 16) / 4;
+
+      // If the variable would cross a 16-byte register boundary, pad to the next register.
+      if (comp + num_comp > 4)
+      {
+        byte_offset = (reg + 1) * 16;
+      }
+
+      const u32 final_reg = byte_offset / 16;
+      const u32 final_comp = (byte_offset % 16) / 4;
+
+      vars.push_back({name, final_reg, final_comp, num_comp, is_bool});
+      byte_offset += num_comp * 4;
     }
+
+    const u32 total_registers = (byte_offset + 15) / 16;
+
+    // Emit float4 register declarations.
+    for (u32 r = 0; r < total_registers; r++)
+      ss << "float4 u_d3d9_cb" << r << " : register(c" << (base_register + r) << ");\n";
+
+    // Emit #define macros mapping variable names to register components.
+    for (const auto& var : vars)
+    {
+      ss << "#define " << var.name << " ";
+      if (var.is_bool)
+      {
+        ss << "(u_d3d9_cb" << var.reg << "." << "xyzw"[var.start_comp] << " != 0.0)";
+      }
+      else if (var.num_comp == 1)
+      {
+        ss << "u_d3d9_cb" << var.reg << "." << "xyzw"[var.start_comp];
+      }
+      else
+      {
+        ss << "u_d3d9_cb" << var.reg << ".";
+        for (u32 c = 0; c < var.num_comp; c++)
+          ss << "xyzw"[var.start_comp + c];
+      }
+      ss << "\n";
+    }
+
     ss << "\n";
     m_has_uniform_buffer = true;
     return;

@@ -1361,7 +1361,11 @@ CONSTANT float4 TRANSPARENT_PIXEL_COLOR = float4(0.0, 0.0, 0.0, 0.0);
   #define APPLY_UV_LIMITS(coords, uv_limits) (coords)
 #endif
 
+#if API_D3D9
+int ApplyTextureWindowCoord(int coord, int and_value, int or_value)
+#else
 int ApplyTextureWindowCoord(int coord, uint and_value, uint or_value)
+#endif
 {
   CONSTANT int bit_weights[5] = {1, 2, 4, 8, 16};
   const int mask = (255 - int(and_value)) / 8;
@@ -1451,7 +1455,11 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
     // use texelFetch()/load for native resolution to work around point sampling precision
     // in some drivers, such as older AMD and Mali Midgard
     #if !UPSCALED
-      float4 texel = LOAD_TEXTURE(samp0, int2(vicoord), 0);
+      #if API_D3D9
+        float4 texel = SAMPLE_TEXTURE_LEVEL(samp0, (float2(vicoord) + float2(0.5, 0.5)) * RCP_VRAM_SIZE, 0.0);
+      #else
+        float4 texel = LOAD_TEXTURE(samp0, int2(vicoord), 0);
+      #endif
     #else
       float4 texel = SAMPLE_TEXTURE_LEVEL(samp0, float2(vicoord) * RCP_VRAM_SIZE, 0.0);
     #endif
@@ -1488,7 +1496,11 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
     #endif
 
     #if !UPSCALED
-      return LOAD_TEXTURE(samp0, int2(palette_icoord), 0);
+      #if API_D3D9
+        return SAMPLE_TEXTURE_LEVEL(samp0, (float2(palette_icoord) + float2(0.5, 0.5)) * RCP_VRAM_SIZE, 0.0);
+      #else
+        return LOAD_TEXTURE(samp0, int2(palette_icoord), 0);
+      #endif
     #else
       return SAMPLE_TEXTURE_LEVEL(samp0, float2(palette_icoord) * RCP_VRAM_SIZE, 0.0);
     #endif
@@ -1501,7 +1513,11 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
       #else
         int2 vicoord = (int2(texpage.xy) + icoord) & int2(1023, 511);
       #endif
-      return LOAD_TEXTURE(samp0, int2(vicoord), 0);
+      #if API_D3D9
+        return SAMPLE_TEXTURE_LEVEL(samp0, (float2(vicoord) + float2(0.5, 0.5)) * RCP_VRAM_SIZE, 0.0);
+      #else
+        return LOAD_TEXTURE(samp0, int2(vicoord), 0);
+      #endif
     #else
       // Coordinates are already upscaled, we need to downscale them to apply the texture
       // window, then re-upscale/offset. We can't round here, because it could result in
@@ -1549,10 +1565,14 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
     if (texture_filtering != GPUTextureFilter::Nearest)
       WriteBatchTextureFilter(ss, texture_filtering);
 
+    const char* texpage_type_frag = (m_render_api == RenderAPI::D3D9) ?
+      (palette ? "int4 v_texpage" : "int2 v_texpage") :
+      (palette ? "uint4 v_texpage" : "uint2 v_texpage");
+
     if (uv_limits)
     {
       DeclareFragmentEntryPoint(ss, 1, 1,
-                                {{"", "float v_posz"}, {"nointerpolation", palette ? "uint4 v_texpage" : "uint2 v_texpage"},
+                                {{"", "float v_posz"}, {"nointerpolation", texpage_type_frag},
                                  {"nointerpolation", "float4 v_uv_limits"}},
                                 true, num_fragment_outputs, use_dual_source, write_mask_as_depth, msaa,
                                 per_sample_shading, false, disable_color_perspective, shader_blending && !use_rov,
@@ -1561,7 +1581,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
     else
     {
       DeclareFragmentEntryPoint(ss, 1, 1,
-                                {{"", "float v_posz"}, {"nointerpolation", palette ? "uint4 v_texpage" : "uint2 v_texpage"}}, true,
+                                {{"", "float v_posz"}, {"nointerpolation", texpage_type_frag}}, true,
                                 num_fragment_outputs, use_dual_source, write_mask_as_depth, msaa, per_sample_shading,
                                 false, disable_color_perspective, shader_blending && !use_rov, use_rov);
     }
@@ -2088,6 +2108,13 @@ std::string GPU_HW_ShaderGen::GenerateVRAMReadFragmentShader(u32 resolution_scal
   DeclareUniformBuffer(ss, {"uint2 u_base_coords", "uint2 u_size"}, true);
   DeclareTexture(ss, "samp0", 0, msaa);
 
+  // For D3D9 LOAD_TEXTURE normalization
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    ss << "CONSTANT float2 RCP_VRAM_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << "u * RESOLUTION_SCALE), "
+       << "1.0 / float(" << VRAM_HEIGHT << "u * RESOLUTION_SCALE));\n";
+  }
+
   ss << R"(
 float4 LoadVRAM(int2 coords)
 {
@@ -2098,7 +2125,11 @@ float4 LoadVRAM(int2 coords)
   value /= float(MULTISAMPLES);
   return value;
 #else
+#if API_D3D9
+  return SAMPLE_TEXTURE_LEVEL(samp0, (float2(coords) + float2(0.5, 0.5)) * RCP_VRAM_TEXTURE_SIZE, 0.0);
+#else
   return LOAD_TEXTURE(samp0, coords, 0);
+#endif
 #endif
 }
 
@@ -2235,7 +2266,7 @@ std::string GPU_HW_ShaderGen::GenerateVRAMWriteFragmentShader(bool use_buffer, b
 
 #if !USE_BUFFER
 #if API_D3D9
-  int value = int(roundEven(saturate(LOAD_TEXTURE(samp0, int2(offset), 0).x) * 65535.0));
+  int value = int(roundEven(saturate(SAMPLE_TEXTURE_LEVEL(samp0, (float2(offset) + float2(0.5, 0.5)) / u_size, 0.0).x) * 65535.0));
 #else
   uint value = LOAD_TEXTURE(samp0, int2(offset), 0).x;
 #endif
@@ -2305,6 +2336,8 @@ std::string GPU_HW_ShaderGen::GenerateVRAMCopyFragmentShader(bool write_mask_as_
   // sample and apply mask bit
 #if MSAA_COPY
   float4 color = LOAD_TEXTURE_MS(samp0, int2(src_coords), f_sample_index);
+#elif API_D3D9
+  float4 color = SAMPLE_TEXTURE_LEVEL(samp0, (float2(src_coords) + float2(0.5, 0.5)) / u_vram_size, 0.0);
 #else
   float4 color = LOAD_TEXTURE(samp0, int2(src_coords), 0);
 #endif
@@ -2393,6 +2426,8 @@ std::string GPU_HW_ShaderGen::GenerateVRAMUpdateDepthFragmentShader(bool msaa) c
 {
 #if MULTISAMPLING
   o_depth = LOAD_TEXTURE_MS(samp0, int2(v_pos.xy), f_sample_index).a;
+#elif API_D3D9
+  o_depth = SAMPLE_TEXTURE_LEVEL(samp0, v_tex0, 0.0).a;
 #else
   o_depth = LOAD_TEXTURE(samp0, int2(v_pos.xy), 0).a;
 #endif

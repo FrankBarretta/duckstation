@@ -604,9 +604,15 @@ void D3D9Device::SetFeatures()
 {
   D3DCAPS9 caps = {};
   if (m_d3d && SUCCEEDED(m_d3d->GetDeviceCaps(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, &caps)))
+  {
     m_max_texture_size = std::min<u32>(caps.MaxTextureWidth, caps.MaxTextureHeight);
+    m_max_render_targets = std::max<u32>(caps.NumSimultaneousRTs, 1u);
+  }
   else
+  {
     m_max_texture_size = 4096;
+    m_max_render_targets = 1;
+  }
 
   m_render_api_version = 900;
   m_max_multisamples = 1;
@@ -1147,11 +1153,41 @@ void D3D9Device::SetRenderTargets(GPUTexture* const* rts, u32 num_rts, GPUTextur
   if (!m_device)
     return;
 
-  IDirect3DSurface9* rt_surface = m_backbuffer.Get();
-  if (num_rts > 0 && rts && rts[0])
-    rt_surface = static_cast<D3D9Texture*>(rts[0])->GetD3DSurface();
+  const u32 clamped_num_rts = std::min(num_rts, m_max_render_targets);
+  if (clamped_num_rts != num_rts)
+    WARNING_LOG("D3D9 backend clamped {} render targets to device limit {}.", num_rts, clamped_num_rts);
 
-  m_device->SetRenderTarget(0, rt_surface);
+  for (u32 slot = 0; slot < MAX_TEXTURE_SAMPLERS; slot++)
+  {
+    D3D9Texture* const current_texture = m_current_textures[slot];
+    if (!current_texture)
+      continue;
+
+    bool conflicts = (ds != nullptr && current_texture == static_cast<D3D9Texture*>(ds));
+    for (u32 rt_index = 0; !conflicts && rt_index < clamped_num_rts; rt_index++)
+      conflicts = (rts[rt_index] != nullptr && current_texture == static_cast<D3D9Texture*>(rts[rt_index]));
+
+    if (conflicts)
+    {
+      m_current_textures[slot] = nullptr;
+      m_device->SetTexture(slot, nullptr);
+    }
+  }
+
+  IDirect3DSurface9* rt_surface0 = m_backbuffer.Get();
+  if (clamped_num_rts > 0 && rts && rts[0])
+    rt_surface0 = static_cast<D3D9Texture*>(rts[0])->GetD3DSurface();
+
+  m_device->SetRenderTarget(0, rt_surface0);
+  for (u32 i = 1; i < clamped_num_rts; i++)
+  {
+    IDirect3DSurface9* const rt_surface = (rts && rts[i]) ? static_cast<D3D9Texture*>(rts[i])->GetD3DSurface() : nullptr;
+    m_device->SetRenderTarget(i, rt_surface);
+  }
+  for (u32 i = clamped_num_rts; i < m_num_current_render_targets; i++)
+    m_device->SetRenderTarget(i, nullptr);
+
+  m_num_current_render_targets = clamped_num_rts;
   m_device->SetDepthStencilSurface(ds ? static_cast<D3D9Texture*>(ds)->GetD3DSurface() : nullptr);
 }
 
@@ -1171,6 +1207,7 @@ void D3D9Device::SetTextureSampler(u32 slot, GPUTexture* texture, GPUSampler* sa
   const GPUSampler::Config config = d3d_sampler ? d3d_sampler->GetConfig() : GPUSampler::GetLinearConfig();
   const bool anisotropic = (config.anisotropy.GetValue() > 1);
 
+  m_current_textures[slot] = d3d_texture;
   m_device->SetTexture(slot, d3d_texture ? d3d_texture->GetD3DTexture() : nullptr);
   m_device->SetSamplerState(slot, D3DSAMP_ADDRESSU, GetAddressMode(config.address_u));
   m_device->SetSamplerState(slot, D3DSAMP_ADDRESSV, GetAddressMode(config.address_v));
@@ -1254,8 +1291,13 @@ void D3D9Device::DrawIndexed(u32 index_count, u32 base_index, u32 base_vertex)
   const UINT primitive_count = (m_current_pipeline->GetPrimitive() == D3DPT_TRIANGLESTRIP) ? (index_count - 2) :
                                (m_current_pipeline->GetPrimitive() == D3DPT_TRIANGLELIST) ? (index_count / 3) :
                                (m_current_pipeline->GetPrimitive() == D3DPT_LINELIST) ? (index_count / 2) : index_count;
-  m_device->DrawIndexedPrimitive(m_current_pipeline->GetPrimitive(), 0, 0, base_vertex + index_count, base_index,
-                                 primitive_count);
+  const u32 total_vertices = m_current_pipeline->UsesInternalScreenQuad() ? 4u :
+                              (m_current_pipeline->GetVertexStride() > 0 ?
+                                 (m_vertex_buffer_position / m_current_pipeline->GetVertexStride()) :
+                                 0u);
+  const u32 available_vertices = (base_vertex < total_vertices) ? (total_vertices - base_vertex) : 0u;
+  m_device->DrawIndexedPrimitive(m_current_pipeline->GetPrimitive(), static_cast<INT>(base_vertex), 0,
+                                 static_cast<UINT>(available_vertices), base_index, primitive_count);
 }
 
 void D3D9Device::DrawIndexedWithPushConstants(u32 index_count, u32 base_index, u32 base_vertex,
@@ -1273,8 +1315,13 @@ void D3D9Device::DrawIndexedWithPushConstants(u32 index_count, u32 base_index, u
   const UINT primitive_count = (m_current_pipeline->GetPrimitive() == D3DPT_TRIANGLESTRIP) ? (index_count - 2) :
                                (m_current_pipeline->GetPrimitive() == D3DPT_TRIANGLELIST) ? (index_count / 3) :
                                (m_current_pipeline->GetPrimitive() == D3DPT_LINELIST) ? (index_count / 2) : index_count;
-  m_device->DrawIndexedPrimitive(m_current_pipeline->GetPrimitive(), 0, 0, base_vertex + index_count, base_index,
-                                 primitive_count);
+  const u32 total_vertices = m_current_pipeline->UsesInternalScreenQuad() ? 4u :
+                              (m_current_pipeline->GetVertexStride() > 0 ?
+                                 (m_vertex_buffer_position / m_current_pipeline->GetVertexStride()) :
+                                 0u);
+  const u32 available_vertices = (base_vertex < total_vertices) ? (total_vertices - base_vertex) : 0u;
+  m_device->DrawIndexedPrimitive(m_current_pipeline->GetPrimitive(), static_cast<INT>(base_vertex), 0,
+                                 static_cast<UINT>(available_vertices), base_index, primitive_count);
 }
 
 void D3D9Device::Dispatch(u32 threads_x, u32 threads_y, u32 threads_z, u32 group_size_x, u32 group_size_y,
@@ -1443,6 +1490,7 @@ void D3D9Device::DestroyDevice()
 {
   m_current_pipeline = nullptr;
   m_uniform_buffer_data.clear();
+  m_num_current_render_targets = 0;
   m_backbuffer.Reset();
   m_vertex_buffer.Reset();
   m_index_buffer.Reset();

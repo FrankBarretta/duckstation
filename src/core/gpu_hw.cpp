@@ -43,6 +43,23 @@
 
 LOG_CHANNEL(GPU_HW);
 
+// D3D9 SM3 constant registers are float4. u32/s32 values in push constant
+// structs must be converted to float before uploading via SetVertexShaderConstantF.
+// This helper converts a properly-sized data buffer, treating specified byte
+// offsets as u32->float conversions. Remaining bytes are left as-is (already float).
+template<typename T>
+static void ConvertPushConstantsForD3D9(float* dst, const T& src, std::initializer_list<size_t> uint_offsets)
+{
+  std::memcpy(dst, &src, sizeof(T));
+  for (const size_t off : uint_offsets)
+  {
+    u32 ival;
+    std::memcpy(&ival, reinterpret_cast<const u8*>(&src) + off, sizeof(u32));
+    const float fval = static_cast<float>(ival);
+    std::memcpy(reinterpret_cast<u8*>(dst) + off, &fval, sizeof(float));
+  }
+}
+
 // TODO: instead of full state restore, only restore what changed
 
 static constexpr GPUTextureFormat VRAM_RT_FORMAT = GPUTextureFormat::RGBA8;
@@ -3446,7 +3463,24 @@ void GPU_HW::FillVRAM(u32 x, u32 y, u32 width, u32 height, u32 color, bool inter
 
   const GSVector4i scaled_bounds = bounds.mul32l(GSVector4i(m_resolution_scale));
   g_gpu_device->SetScissor(scaled_bounds);
-  DrawScreenQuad(scaled_bounds, m_vram_texture->GetSizeVec(), GSVector4::zero(), &uniforms, sizeof(uniforms));
+
+  if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+  {
+    // D3D9: convert u32 fields to float for constant registers
+    float d3d9_uniforms[sizeof(VRAMFillUBOData) / sizeof(float)];
+    ConvertPushConstantsForD3D9(d3d9_uniforms, uniforms,
+                                {offsetof(VRAMFillUBOData, u_dst_x), offsetof(VRAMFillUBOData, u_dst_y),
+                                 offsetof(VRAMFillUBOData, u_end_x), offsetof(VRAMFillUBOData, u_end_y),
+                                 offsetof(VRAMFillUBOData, u_interlaced_displayed_field),
+                                 offsetof(VRAMFillUBOData, pad[0]), offsetof(VRAMFillUBOData, pad[1]),
+                                 offsetof(VRAMFillUBOData, pad[2])});
+    DrawScreenQuad(scaled_bounds, m_vram_texture->GetSizeVec(), GSVector4::zero(), d3d9_uniforms,
+                   sizeof(d3d9_uniforms));
+  }
+  else
+  {
+    DrawScreenQuad(scaled_bounds, m_vram_texture->GetSizeVec(), GSVector4::zero(), &uniforms, sizeof(uniforms));
+  }
 
   RestoreDeviceContext();
 }
@@ -3486,12 +3520,25 @@ void GPU_HW::DownloadVRAMFromGPU(u32 x, u32 y, u32 width, u32 height)
   const u32 encoded_height = copy_rect.height();
 
   // Encode the 24-bit texture as 16-bit.
-  const s32 uniforms[4] = {copy_rect.left, copy_rect.top, copy_rect.width(), copy_rect.height()};
-  g_gpu_device->SetRenderTarget(m_vram_readback_texture.get());
-  g_gpu_device->SetPipeline(m_vram_readback_pipeline.get());
-  g_gpu_device->SetTextureSampler(0, m_vram_texture.get(), g_gpu_device->GetNearestSampler());
-  g_gpu_device->SetViewportAndScissor(0, 0, encoded_width, encoded_height);
-  g_gpu_device->DrawWithPushConstants(3, 0, uniforms, sizeof(uniforms));
+  const s32 uniforms_raw[4] = {copy_rect.left, copy_rect.top, copy_rect.width(), copy_rect.height()};
+  if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+  {
+    const float uniforms[4] = {static_cast<float>(uniforms_raw[0]), static_cast<float>(uniforms_raw[1]),
+                                static_cast<float>(uniforms_raw[2]), static_cast<float>(uniforms_raw[3])};
+    g_gpu_device->SetRenderTarget(m_vram_readback_texture.get());
+    g_gpu_device->SetPipeline(m_vram_readback_pipeline.get());
+    g_gpu_device->SetTextureSampler(0, m_vram_texture.get(), g_gpu_device->GetNearestSampler());
+    g_gpu_device->SetViewportAndScissor(0, 0, encoded_width, encoded_height);
+    g_gpu_device->DrawWithPushConstants(3, 0, uniforms, sizeof(uniforms));
+  }
+  else
+  {
+    g_gpu_device->SetRenderTarget(m_vram_readback_texture.get());
+    g_gpu_device->SetPipeline(m_vram_readback_pipeline.get());
+    g_gpu_device->SetTextureSampler(0, m_vram_texture.get(), g_gpu_device->GetNearestSampler());
+    g_gpu_device->SetViewportAndScissor(0, 0, encoded_width, encoded_height);
+    g_gpu_device->DrawWithPushConstants(3, 0, uniforms_raw, sizeof(uniforms_raw));
+  }
 
   // Stage the readback and copy it into our shadow buffer.
   if (m_vram_readback_download_texture->IsImported())
@@ -3614,7 +3661,19 @@ void GPU_HW::UpdateVRAMOnGPU(u32 x, u32 y, u32 width, u32 height, const void* da
   else
     g_gpu_device->SetTextureBuffer(0, m_vram_upload_buffer.get());
 
-  DrawScreenQuad(scaled_bounds, m_vram_texture->GetSizeVec(), GSVector4::zero(), &uniforms, sizeof(uniforms));
+  if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+  {
+    float d3d9_uniforms[sizeof(VRAMWriteUBOData) / sizeof(float)];
+    ConvertPushConstantsForD3D9(d3d9_uniforms, uniforms,
+                                {offsetof(VRAMWriteUBOData, u_buffer_base_offset),
+                                 offsetof(VRAMWriteUBOData, u_mask_or_bits)});
+    DrawScreenQuad(scaled_bounds, m_vram_texture->GetSizeVec(), GSVector4::zero(), d3d9_uniforms,
+                   sizeof(d3d9_uniforms));
+  }
+  else
+  {
+    DrawScreenQuad(scaled_bounds, m_vram_texture->GetSizeVec(), GSVector4::zero(), &uniforms, sizeof(uniforms));
+  }
 
   RestoreDeviceContext();
 }
@@ -3714,8 +3773,21 @@ void GPU_HW::CopyVRAM(u32 src_x, u32 src_y, u32 dst_x, u32 dst_y, u32 width, u32
 
     const GSVector4i dst_bounds_scaled = dst_bounds.mul32l(GSVector4i(m_resolution_scale));
     g_gpu_device->SetScissor(dst_bounds_scaled);
-    DrawScreenQuad(dst_bounds_scaled, m_vram_texture->GetSizeVec(), GSVector4::cxpr(0.0f, 0.0f, 1.0f, 1.0f), &uniforms,
-                   sizeof(uniforms));
+
+    if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+    {
+      float d3d9_uniforms[sizeof(VRAMCopyUBOData) / sizeof(float)];
+      ConvertPushConstantsForD3D9(d3d9_uniforms, uniforms,
+                                  {offsetof(VRAMCopyUBOData, u_set_mask_bit),
+                                   offsetof(VRAMCopyUBOData, pad)});
+      DrawScreenQuad(dst_bounds_scaled, m_vram_texture->GetSizeVec(), GSVector4::cxpr(0.0f, 0.0f, 1.0f, 1.0f),
+                     d3d9_uniforms, sizeof(d3d9_uniforms));
+    }
+    else
+    {
+      DrawScreenQuad(dst_bounds_scaled, m_vram_texture->GetSizeVec(), GSVector4::cxpr(0.0f, 0.0f, 1.0f, 1.0f),
+                     &uniforms, sizeof(uniforms));
+    }
     RestoreDeviceContext();
 
     if (check_mask && !m_pgxp_depth_buffer)
@@ -3994,7 +4066,41 @@ void GPU_HW::FlushRender()
 
   if (m_batch_ubo_dirty)
   {
-    g_gpu_device->UploadUniformBuffer(&m_batch_ubo_data, sizeof(m_batch_ubo_data));
+    if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+    {
+      // D3D9 constant registers are float4, so uint fields must be converted to float.
+      // Layout must match the packed register mapping in DeclareUniformBuffer.
+      struct D3D9BatchUBOData
+      {
+        float u_texture_window[4];
+        float u_src_alpha_factor;
+        float u_dst_alpha_factor;
+        float u_interlaced_displayed_field;
+        float u_set_mask_while_drawing;
+        float u_resolution_scale;
+        float u_rcp_resolution_scale;
+        float u_resolution_scale_minus_one;
+      };
+      static_assert(sizeof(D3D9BatchUBOData) == sizeof(BatchUBOData));
+
+      D3D9BatchUBOData d3d9_ubo;
+      d3d9_ubo.u_texture_window[0] = static_cast<float>(m_batch_ubo_data.u_texture_window[0]);
+      d3d9_ubo.u_texture_window[1] = static_cast<float>(m_batch_ubo_data.u_texture_window[1]);
+      d3d9_ubo.u_texture_window[2] = static_cast<float>(m_batch_ubo_data.u_texture_window[2]);
+      d3d9_ubo.u_texture_window[3] = static_cast<float>(m_batch_ubo_data.u_texture_window[3]);
+      d3d9_ubo.u_src_alpha_factor = m_batch_ubo_data.u_src_alpha_factor;
+      d3d9_ubo.u_dst_alpha_factor = m_batch_ubo_data.u_dst_alpha_factor;
+      d3d9_ubo.u_interlaced_displayed_field = static_cast<float>(m_batch_ubo_data.u_interlaced_displayed_field);
+      d3d9_ubo.u_set_mask_while_drawing = static_cast<float>(m_batch_ubo_data.u_set_mask_while_drawing);
+      d3d9_ubo.u_resolution_scale = m_batch_ubo_data.u_resolution_scale;
+      d3d9_ubo.u_rcp_resolution_scale = m_batch_ubo_data.u_rcp_resolution_scale;
+      d3d9_ubo.u_resolution_scale_minus_one = m_batch_ubo_data.u_resolution_scale_minus_one;
+      g_gpu_device->UploadUniformBuffer(&d3d9_ubo, sizeof(d3d9_ubo));
+    }
+    else
+    {
+      g_gpu_device->UploadUniformBuffer(&m_batch_ubo_data, sizeof(m_batch_ubo_data));
+    }
     // m_counters.num_ubo_updates++;
     m_batch_ubo_dirty = false;
   }
@@ -4166,7 +4272,19 @@ void GPU_HW::UpdateDisplay(const GPUBackendUpdateDisplayCommand* cmd)
     };
     const ExtractUniforms uniforms = {reinterpret_start_x, scaled_vram_offset_y, static_cast<float>(skip_x),
                                       static_cast<float>(line_skip ? 2 : 1)};
-    g_gpu_device->DrawWithPushConstants(3, 0, &uniforms, sizeof(uniforms));
+
+    if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+    {
+      float d3d9_uniforms[sizeof(ExtractUniforms) / sizeof(float)];
+      ConvertPushConstantsForD3D9(d3d9_uniforms, uniforms,
+                                  {offsetof(ExtractUniforms, vram_offset_x),
+                                   offsetof(ExtractUniforms, vram_offset_y)});
+      g_gpu_device->DrawWithPushConstants(3, 0, d3d9_uniforms, sizeof(d3d9_uniforms));
+    }
+    else
+    {
+      g_gpu_device->DrawWithPushConstants(3, 0, &uniforms, sizeof(uniforms));
+    }
 
     m_vram_extract_texture->MakeReadyForSampling();
     if (depth_source)
@@ -4408,7 +4526,16 @@ void GPU_HW::DownsampleFramebufferBoxFilter(GPUTexture* source, const GSVector4i
   g_gpu_device->SetPipeline(m_downsample_pass_pipeline.get());
   g_gpu_device->SetTextureSampler(0, source, g_gpu_device->GetNearestSampler());
   g_gpu_device->SetViewportAndScissor(0, 0, ds_width, ds_height);
-  g_gpu_device->DrawWithPushConstants(3, 0, uniforms, sizeof(uniforms));
+
+  if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+  {
+    const float d3d9_uniforms[4] = {static_cast<float>(left), static_cast<float>(top), 0.0f, 0.0f};
+    g_gpu_device->DrawWithPushConstants(3, 0, d3d9_uniforms, sizeof(d3d9_uniforms));
+  }
+  else
+  {
+    g_gpu_device->DrawWithPushConstants(3, 0, uniforms, sizeof(uniforms));
+  }
 
   RestoreDeviceContext();
 
