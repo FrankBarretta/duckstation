@@ -357,6 +357,7 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
   gpu_pgxp_enable = si.GetBoolValue("GPU", "PGXPEnable", false);
   LoadPGXPSettings(si);
   gpu_show_vram = si.GetBoolValue("Debug", "ShowVRAM");
+  gpu_rtx_remix_compatibility = si.GetBoolValue("GPU", "RTXRemixCompatibility", false);
   gpu_dump_cpu_to_vram_copies = si.GetBoolValue("Debug", "DumpCPUToVRAMCopies");
   gpu_dump_vram_to_cpu_copies = si.GetBoolValue("Debug", "DumpVRAMToCPUCopies");
   gpu_dump_fast_replay_mode = si.GetBoolValue("GPU", "DumpFastReplayMode", false);
@@ -741,6 +742,7 @@ void Settings::Save(SettingsInterface& si, bool ignore_base) const
   si.SetBoolValue("GPU", "PGXPTransparentDepthTest", gpu_pgxp_transparent_depth);
   si.SetFloatValue("GPU", "PGXPDepthThreshold", GetPGXPDepthClearThreshold());
   si.SetBoolValue("Debug", "ShowVRAM", gpu_show_vram);
+  si.SetBoolValue("GPU", "RTXRemixCompatibility", gpu_rtx_remix_compatibility);
   si.SetBoolValue("Debug", "DumpCPUToVRAMCopies", gpu_dump_cpu_to_vram_copies);
   si.SetBoolValue("Debug", "DumpVRAMToCPUCopies", gpu_dump_vram_to_cpu_copies);
   si.SetBoolValue("GPU", "DumpFastReplayMode", gpu_dump_fast_replay_mode);
@@ -1174,6 +1176,7 @@ void Settings::ApplySettingRestrictions()
 #endif
 
     gpu_show_vram = false;
+    gpu_rtx_remix_compatibility = false;
     gpu_dump_cpu_to_vram_copies = false;
     gpu_dump_vram_to_cpu_copies = false;
   }

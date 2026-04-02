@@ -829,6 +829,12 @@ public:
                                          u32 group_size_y, u32 group_size_z, const void* push_constants,
                                          u32 push_constants_size) = 0;
 
+  // RTX Remix compatibility: called around shadow draws that replay batch geometry to the
+  // primary render target. The D3D9 backend uses this to set fixed-function transform matrices
+  // so that RTX Remix can detect a valid camera and process the geometry.
+  virtual void BeginRTXRemixShadowDraw() {}
+  virtual void EndRTXRemixShadowDraw() {}
+
   /// Returns false if the window was completely occluded.
   virtual GPUPresentResult BeginPresent(GPUSwapChain* swap_chain, u32 clear_color = DEFAULT_CLEAR_COLOR) = 0;
   virtual void EndPresent(GPUSwapChain* swap_chain, bool explicit_submit, u64 submit_time = 0) = 0;

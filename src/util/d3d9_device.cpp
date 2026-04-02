@@ -1184,7 +1184,8 @@ void D3D9Device::SetRenderTargets(GPUTexture* const* rts, u32 num_rts, GPUTextur
     IDirect3DSurface9* const rt_surface = (rts && rts[i]) ? static_cast<D3D9Texture*>(rts[i])->GetD3DSurface() : nullptr;
     m_device->SetRenderTarget(i, rt_surface);
   }
-  for (u32 i = clamped_num_rts; i < m_num_current_render_targets; i++)
+  // Slot 0 is always explicitly set above; only clear additional MRT slots that are no longer needed.
+  for (u32 i = std::max(clamped_num_rts, 1u); i < m_num_current_render_targets; i++)
     m_device->SetRenderTarget(i, nullptr);
 
   m_num_current_render_targets = clamped_num_rts;
@@ -1348,6 +1349,31 @@ GPUPresentResult D3D9Device::BeginPresent(GPUSwapChain* swap_chain, u32 clear_co
   m_device->SetDepthStencilSurface(nullptr);
   m_device->BeginScene();
 
+  // RTX Remix compatibility: Re-set transform matrices each frame so Remix
+  // can detect the camera on every frame. Perspective projection required.
+  {
+    const D3DMATRIX identity = {{
+      1.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 0.0f, 1.0f,
+    }};
+    const float h = 1.0f;
+    const float w = h * 3.0f / 4.0f;
+    const float zn = 0.1f;
+    const float zf = 10000.0f;
+    const float q = zf / (zf - zn);
+    const D3DMATRIX perspective = {{
+      w,    0.0f, 0.0f,     0.0f,
+      0.0f, h,    0.0f,     0.0f,
+      0.0f, 0.0f, q,        1.0f,
+      0.0f, 0.0f, -q * zn,  0.0f,
+    }};
+    m_device->SetTransform(D3DTS_WORLD, &identity);
+    m_device->SetTransform(D3DTS_VIEW, &identity);
+    m_device->SetTransform(D3DTS_PROJECTION, &perspective);
+  }
+
   const auto color = RGBA8ToFloat(clear_color);
   m_device->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_COLORVALUE(color[0], color[1], color[2], color[3]), 1.0f, 0);
   return GPUPresentResult::OK;
@@ -1367,6 +1393,45 @@ void D3D9Device::EndPresent(GPUSwapChain* swap_chain, bool explicit_present, u64
 
 void D3D9Device::SubmitPresent(GPUSwapChain* swap_chain)
 {
+}
+
+void D3D9Device::BeginRTXRemixShadowDraw()
+{
+  if (!m_device)
+    return;
+
+  // RTX Remix detects cameras from the D3D9 fixed-function transform matrices (SetTransform).
+  // Set a valid perspective projection right before the shadow draw so Remix can extract a camera.
+  // These transforms are independent of the programmable vertex shader - Remix reads them separately
+  // from the DXVK device state to determine the camera position and orientation.
+  const D3DMATRIX identity = {{
+    1.0f, 0.0f, 0.0f, 0.0f,
+    0.0f, 1.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 1.0f, 0.0f,
+    0.0f, 0.0f, 0.0f, 1.0f,
+  }};
+  // D3D LH Perspective: FOV=90deg, Aspect=4:3, Near=0.1, Far=10000
+  const float h = 1.0f;
+  const float w = h * 3.0f / 4.0f;
+  const float zn = 0.1f;
+  const float zf = 10000.0f;
+  const float q = zf / (zf - zn);
+  const D3DMATRIX perspective = {{
+    w,    0.0f, 0.0f,     0.0f,
+    0.0f, h,    0.0f,     0.0f,
+    0.0f, 0.0f, q,        1.0f,
+    0.0f, 0.0f, -q * zn,  0.0f,
+  }};
+  m_device->SetTransform(D3DTS_WORLD, &identity);
+  m_device->SetTransform(D3DTS_VIEW, &identity);
+  m_device->SetTransform(D3DTS_PROJECTION, &perspective);
+  m_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+}
+
+void D3D9Device::EndRTXRemixShadowDraw()
+{
+  // Nothing to restore — the transforms are overwritten each time
+  // BeginRTXRemixShadowDraw is called, and they don't affect programmable-shader rendering.
 }
 
 bool D3D9Device::SupportsTextureFormat(GPUTextureFormat format) const
@@ -1433,6 +1498,35 @@ bool D3D9Device::CreateDeviceAndMainSwapChain(std::string_view adapter, CreateFl
   }
 
   SetFeatures();
+
+  // RTX Remix compatibility: Set fixed-function transform matrices so that RTX Remix
+  // can detect a valid camera. RTX Remix rejects orthographic projections, so we provide
+  // a standard D3D left-handed perspective projection.
+  {
+    const D3DMATRIX identity = {{
+      1.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 0.0f, 1.0f,
+    }};
+    // D3D LH Perspective: FOV=90deg, Aspect=4:3, Near=0.1, Far=10000
+    const float h = 1.0f;             // 1/tan(fov/2) = 1/tan(45deg)
+    const float w = h * 3.0f / 4.0f;  // h / aspect
+    const float zn = 0.1f;
+    const float zf = 10000.0f;
+    const float q = zf / (zf - zn);
+    const D3DMATRIX perspective = {{
+      w,    0.0f, 0.0f,     0.0f,
+      0.0f, h,    0.0f,     0.0f,
+      0.0f, 0.0f, q,        1.0f,
+      0.0f, 0.0f, -q * zn,  0.0f,
+    }};
+    m_device->SetTransform(D3DTS_WORLD, &identity);
+    m_device->SetTransform(D3DTS_VIEW, &identity);
+    m_device->SetTransform(D3DTS_PROJECTION, &perspective);
+    m_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+  }
+
   hr = m_device->GetRenderTarget(0, m_backbuffer.ReleaseAndGetAddressOf());
   if (FAILED(hr))
   {
@@ -1650,4 +1744,7 @@ void D3D9Device::ApplyPipelineState(D3D9Pipeline* pipeline)
                            blend_op_mapping[static_cast<u8>(pipeline->GetBlendState().alpha_blend_op.GetValue())]);
   m_device->SetRenderState(D3DRS_COLORWRITEENABLE, pipeline->GetBlendState().write_mask);
   m_device->SetRenderState(D3DRS_BLENDFACTOR, pipeline->GetBlendState().constant);
+
+  // RTX Remix compatibility: Ensure fixed-function lighting is always disabled.
+  m_device->SetRenderState(D3DRS_LIGHTING, FALSE);
 }

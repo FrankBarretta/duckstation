@@ -312,6 +312,7 @@ private:
   bool m_texture_window_active : 1 = false;
   bool m_rov_active : 1 = false;
   bool m_draw_with_software_renderer : 1 = false;
+  bool m_rtx_remix_mode : 1 = false;
 
   bool m_use_texture_cache : 1 = false;
   bool m_texture_dumping : 1 = false;

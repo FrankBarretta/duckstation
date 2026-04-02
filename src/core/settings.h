@@ -83,6 +83,7 @@ struct GPUSettings
   bool gpu_modulation_crop : 1 = false;
   bool gpu_texture_cache : 1 = false;
   bool gpu_show_vram : 1 = false;
+  bool gpu_rtx_remix_compatibility : 1 = false;
   bool gpu_dump_cpu_to_vram_copies : 1 = false;
   bool gpu_dump_vram_to_cpu_copies : 1 = false;
   bool gpu_dump_fast_replay_mode : 1 = false;

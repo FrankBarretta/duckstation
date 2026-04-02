@@ -329,6 +329,7 @@ bool GPU_HW::Initialize(bool upload_vram, Error* error)
   m_use_texture_cache = g_gpu_settings.gpu_texture_cache;
   m_texture_dumping = m_use_texture_cache && g_gpu_settings.texture_replacements.dump_textures;
   m_draw_with_software_renderer = ShouldDrawWithSoftwareRenderer();
+  m_rtx_remix_mode = (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9);
 
   CheckSettings();
 
@@ -628,6 +629,7 @@ bool GPU_HW::UpdateSettings(const GPUSettings& old_settings, Error* error)
   m_texture_dumping = m_use_texture_cache && g_gpu_settings.texture_replacements.dump_textures;
   m_batch.sprite_mode = (m_allow_sprite_mode && m_batch.sprite_mode);
   m_draw_with_software_renderer = draw_with_software_renderer;
+  m_rtx_remix_mode = (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9);
 
   const bool depth_buffer_changed = (m_pgxp_depth_buffer != g_gpu_settings.UsingPGXPDepthBuffer());
   if (depth_buffer_changed)
@@ -968,6 +970,7 @@ void GPU_HW::PrintSettingsToLog()
   INFO_LOG("Line detection: {}", Settings::GetLineDetectModeDisplayName(m_line_detect_mode));
   INFO_LOG("Using software renderer for readbacks: {}", m_draw_with_software_renderer ? "YES" : "NO");
   INFO_LOG("Separate sprite shaders: {}", m_allow_sprite_mode ? "YES" : "NO");
+  INFO_LOG("RTX Remix compatibility: {}", m_rtx_remix_mode ? "YES" : "NO");
 }
 
 GPUTextureFormat GPU_HW::GetDepthBufferFormat() const
@@ -4146,6 +4149,40 @@ void GPU_HW::FlushRender()
     else
     {
       DrawBatchVertices(m_batch.GetRenderMode(), index_count, base_index, base_vertex, texture);
+    }
+  }
+
+  // RTX Remix compatibility: replay batch geometry to the primary render target (backbuffer) so that
+  // RTX Remix can intercept and ray-trace it. The normal draw to the VRAM texture above preserves
+  // emulator correctness (VRAM reads, copies, etc.), while this shadow draw provides geometry to Remix.
+  if (m_rtx_remix_mode && m_wireframe_mode != GPUWireframeMode::OnlyWireframe)
+  {
+    GPUSwapChain* swap_chain = g_gpu_device->GetMainSwapChain();
+    if (swap_chain)
+    {
+      // Bind the empty (dummy) texture so RTX Remix can hash it. Render target textures
+      // (like m_vram_read_texture) have no stable content hash and cause Remix to skip the draw.
+      g_gpu_device->SetTextureSampler(0, g_gpu_device->GetEmptyTexture(), g_gpu_device->GetNearestSampler());
+
+      // Switch to backbuffer (passing nullptr binds m_backbuffer in D3D9 backend).
+      g_gpu_device->SetRenderTarget(nullptr, nullptr);
+      g_gpu_device->SetViewportAndScissor(0, 0, static_cast<s32>(swap_chain->GetWidth()),
+                                          static_cast<s32>(swap_chain->GetHeight()));
+
+      // Set up fixed-function transform matrices for RTX Remix camera detection.
+      // Must be called right before the draw so Remix associates the transforms with this draw call.
+      g_gpu_device->BeginRTXRemixShadowDraw();
+
+      // Re-issue the same draw call. Pipeline and index/vertex data are still bound from the normal draw above.
+      g_gpu_device->DrawIndexed(index_count, base_index, base_vertex);
+
+      g_gpu_device->EndRTXRemixShadowDraw();
+
+      // Restore VRAM render target, viewport, scissor, and texture state for subsequent operations.
+      g_gpu_device->SetTextureSampler(0, m_vram_read_texture.get(), g_gpu_device->GetNearestSampler());
+      SetVRAMRenderTarget();
+      g_gpu_device->SetViewport(m_vram_texture->GetRect());
+      SetScissor();
     }
   }
 
