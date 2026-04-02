@@ -193,6 +193,8 @@ private:
   void DeactivateROV();
   void MapGPUBuffer(u32 required_vertices, u32 required_indices);
   void UnmapGPUBuffer(u32 used_vertices, u32 used_indices);
+  void ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num_indices, u32 base_index, u32 base_vertex,
+                                      const GPUTextureCache::Source* texture);
   void DrawBatchVertices(BatchRenderMode render_mode, u32 num_indices, u32 base_index, u32 base_vertex,
                          const GPUTextureCache::Source* texture);
 
@@ -329,6 +331,7 @@ private:
 
   // Texture cache state
   GPUTextureCache::SourceKey m_texture_cache_key = {};
+  const GPUTextureCache::Source* m_rtx_remix_source = nullptr;
 
   // Bounding box of VRAM area that the GPU has drawn into.
   GSVector4i m_vram_dirty_draw_rect = INVALID_RECT;

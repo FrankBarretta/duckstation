@@ -329,7 +329,7 @@ bool GPU_HW::Initialize(bool upload_vram, Error* error)
   m_use_texture_cache = g_gpu_settings.gpu_texture_cache;
   m_texture_dumping = m_use_texture_cache && g_gpu_settings.texture_replacements.dump_textures;
   m_draw_with_software_renderer = ShouldDrawWithSoftwareRenderer();
-  m_rtx_remix_mode = (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9);
+  m_rtx_remix_mode = (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9 && g_gpu_settings.gpu_rtx_remix_compatibility);
 
   CheckSettings();
 
@@ -629,7 +629,7 @@ bool GPU_HW::UpdateSettings(const GPUSettings& old_settings, Error* error)
   m_texture_dumping = m_use_texture_cache && g_gpu_settings.texture_replacements.dump_textures;
   m_batch.sprite_mode = (m_allow_sprite_mode && m_batch.sprite_mode);
   m_draw_with_software_renderer = draw_with_software_renderer;
-  m_rtx_remix_mode = (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9);
+  m_rtx_remix_mode = (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9 && g_gpu_settings.gpu_rtx_remix_compatibility);
 
   const bool depth_buffer_changed = (m_pgxp_depth_buffer != g_gpu_settings.UsingPGXPDepthBuffer());
   if (depth_buffer_changed)
@@ -2217,6 +2217,72 @@ void GPU_HW::UnmapGPUBuffer(u32 used_vertices, u32 used_indices)
   m_batch_index_space = 0;
 }
 
+void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num_indices, u32 base_index,
+                                            u32 base_vertex, const GPUTextureCache::Source* texture)
+{
+  if (!m_rtx_remix_mode || m_wireframe_mode == GPUWireframeMode::OnlyWireframe)
+    return;
+
+  GPUSwapChain* const swap_chain = g_gpu_device->GetMainSwapChain();
+  if (!swap_chain)
+    return;
+
+  const GPUTextureCache::Source* const replay_source = m_rtx_remix_source ? m_rtx_remix_source : texture;
+  GPUTexture* remix_texture = nullptr;
+  BatchTextureMode remix_texture_mode = m_batch.texture_mode;
+  if (m_use_texture_cache && m_batch.texture_mode != BatchTextureMode::Disabled)
+    remix_texture = replay_source ? replay_source->texture : m_vram_read_texture.get();
+
+  const bool has_decoded_texture =
+    (replay_source && replay_source->texture && !replay_source->texture->IsRenderTargetOrDepthStencil() &&
+     m_batch.texture_mode != BatchTextureMode::Disabled);
+  if (has_decoded_texture)
+  {
+    remix_texture = replay_source->texture;
+    remix_texture_mode = m_batch.sprite_mode ? BatchTextureMode::SpritePageTexture : BatchTextureMode::PageTexture;
+  }
+  else if (!remix_texture)
+  {
+    remix_texture = g_gpu_device->GetEmptyTexture();
+    remix_texture_mode = BatchTextureMode::Disabled;
+  }
+
+  const BatchRenderMode remix_render_mode =
+    (render_mode == BatchRenderMode::ShaderBlend) ? m_batch.GetRenderMode() : render_mode;
+  const u8 depth_test = BoolToUInt8(m_batch.use_depth_buffer);
+  const u8 check_mask = 0;
+  const u8 texture_mode =
+    (static_cast<u8>(remix_texture_mode) +
+     ((remix_texture_mode < BatchTextureMode::Disabled && m_batch.sprite_mode) ?
+        static_cast<u8>(BatchTextureMode::SpriteStart) :
+        0));
+
+  g_gpu_device->SetPipeline(m_batch_pipelines[depth_test][static_cast<u8>(m_batch.transparency_mode)]
+                                             [static_cast<u8>(remix_render_mode)][texture_mode]
+                                             [BoolToUInt8(m_batch.dithering)][BoolToUInt8(m_batch.interlacing)]
+                                             [check_mask]
+                                               .get());
+  g_gpu_device->SetTextureSampler(0, remix_texture, g_gpu_device->GetNearestSampler());
+
+  g_gpu_device->SetRenderTarget(nullptr, nullptr);
+  g_gpu_device->SetViewportAndScissor(0, 0, static_cast<s32>(swap_chain->GetWidth()),
+                                      static_cast<s32>(swap_chain->GetHeight()));
+
+  g_gpu_device->BeginRTXRemixShadowDraw();
+  g_gpu_device->DrawIndexed(num_indices, base_index, base_vertex);
+  g_gpu_device->EndRTXRemixShadowDraw();
+
+  if (m_use_texture_cache && m_batch.texture_mode != BatchTextureMode::Disabled)
+  {
+    g_gpu_device->SetTextureSampler(0, texture ? texture->texture : m_vram_read_texture.get(),
+                                    g_gpu_device->GetNearestSampler());
+  }
+
+  SetVRAMRenderTarget();
+  g_gpu_device->SetViewport(m_vram_texture->GetRect());
+  SetScissor();
+}
+
 ALWAYS_INLINE_RELEASE void GPU_HW::DrawBatchVertices(BatchRenderMode render_mode, u32 num_indices, u32 base_index,
                                                      u32 base_vertex, const GPUTextureCache::Source* texture)
 {
@@ -2272,6 +2338,8 @@ ALWAYS_INLINE_RELEASE void GPU_HW::DrawBatchVertices(BatchRenderMode render_mode
   {
     g_gpu_device->DrawIndexed(num_indices, base_index, base_vertex);
   }
+
+  ReplayBatchVerticesForRTXRemix(render_mode, num_indices, base_index, base_vertex, texture);
 }
 
 ALWAYS_INLINE_RELEASE void GPU_HW::ComputeUVPartialDerivatives(const BatchVertex* vertices, float* dudx, float* dudy,
@@ -4080,6 +4148,7 @@ void GPU_HW::FlushRender()
     GL_INS_FMT("UV rect: {}", m_current_uv_rect);
 
   const GPUTextureCache::Source* texture = nullptr;
+  m_rtx_remix_source = nullptr;
   if (m_batch.texture_mode == BatchTextureMode::PageTexture)
   {
     texture = LookupSource(m_texture_cache_key, m_current_uv_rect,
@@ -4088,6 +4157,15 @@ void GPU_HW::FlushRender()
                              GPUTextureCache::PaletteRecordFlags::None);
     if (!texture) [[unlikely]]
       m_batch.texture_mode = static_cast<BatchTextureMode>(m_texture_cache_key.mode);
+  }
+
+  if (m_use_texture_cache && m_batch.texture_mode != BatchTextureMode::Disabled && !m_current_uv_rect.eq(INVALID_RECT))
+  {
+    m_rtx_remix_source = texture ? texture :
+      LookupSource(m_texture_cache_key, m_current_uv_rect,
+                   m_batch.transparency_mode != GPUTransparencyMode::Disabled ?
+                     GPUTextureCache::PaletteRecordFlags::HasSemiTransparentDraws :
+                     GPUTextureCache::PaletteRecordFlags::None);
   }
 
   if (m_batch_ubo_dirty)
@@ -4152,40 +4230,6 @@ void GPU_HW::FlushRender()
     }
   }
 
-  // RTX Remix compatibility: replay batch geometry to the primary render target (backbuffer) so that
-  // RTX Remix can intercept and ray-trace it. The normal draw to the VRAM texture above preserves
-  // emulator correctness (VRAM reads, copies, etc.), while this shadow draw provides geometry to Remix.
-  if (m_rtx_remix_mode && m_wireframe_mode != GPUWireframeMode::OnlyWireframe)
-  {
-    GPUSwapChain* swap_chain = g_gpu_device->GetMainSwapChain();
-    if (swap_chain)
-    {
-      // Bind the empty (dummy) texture so RTX Remix can hash it. Render target textures
-      // (like m_vram_read_texture) have no stable content hash and cause Remix to skip the draw.
-      g_gpu_device->SetTextureSampler(0, g_gpu_device->GetEmptyTexture(), g_gpu_device->GetNearestSampler());
-
-      // Switch to backbuffer (passing nullptr binds m_backbuffer in D3D9 backend).
-      g_gpu_device->SetRenderTarget(nullptr, nullptr);
-      g_gpu_device->SetViewportAndScissor(0, 0, static_cast<s32>(swap_chain->GetWidth()),
-                                          static_cast<s32>(swap_chain->GetHeight()));
-
-      // Set up fixed-function transform matrices for RTX Remix camera detection.
-      // Must be called right before the draw so Remix associates the transforms with this draw call.
-      g_gpu_device->BeginRTXRemixShadowDraw();
-
-      // Re-issue the same draw call. Pipeline and index/vertex data are still bound from the normal draw above.
-      g_gpu_device->DrawIndexed(index_count, base_index, base_vertex);
-
-      g_gpu_device->EndRTXRemixShadowDraw();
-
-      // Restore VRAM render target, viewport, scissor, and texture state for subsequent operations.
-      g_gpu_device->SetTextureSampler(0, m_vram_read_texture.get(), g_gpu_device->GetNearestSampler());
-      SetVRAMRenderTarget();
-      g_gpu_device->SetViewport(m_vram_texture->GetRect());
-      SetScissor();
-    }
-  }
-
   if (m_wireframe_mode != GPUWireframeMode::Disabled)
   {
     // This'll be less than ideal, but wireframe is for debugging, so take the perf hit.
@@ -4193,6 +4237,8 @@ void GPU_HW::FlushRender()
     g_gpu_device->SetPipeline(m_wireframe_pipeline.get());
     g_gpu_device->DrawIndexed(index_count, base_index, base_vertex);
   }
+
+  m_rtx_remix_source = nullptr;
 }
 
 void GPU_HW::DrawingAreaChanged()

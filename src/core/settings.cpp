@@ -1187,6 +1187,32 @@ void Settings::FixIncompatibleSettings(const SettingsInterface& si, bool display
   // fast forward boot requires fast boot
   bios_fast_forward_boot = bios_patch_fast_boot && bios_fast_forward_boot;
 
+  if (gpu_rtx_remix_compatibility)
+  {
+    if (gpu_renderer == GPURenderer::Software)
+    {
+      if (display_osd_messages)
+      {
+        Host::AddKeyedOSDMessage(
+          OSDMessageType::Warning, "rtx_remix_disabled_sw",
+          TRANSLATE_STR("OSDMessage",
+                        "RTX Remix compatibility is incompatible with the software renderer, disabling it."));
+      }
+      gpu_rtx_remix_compatibility = false;
+    }
+    else
+    {
+      // RTX Remix needs DuckStation to preserve as much decoded geometry/material information as possible.
+      gpu_texture_cache = true;
+      gpu_pgxp_enable = true;
+      gpu_pgxp_texture_correction = true;
+      gpu_pgxp_cpu = true;
+      gpu_pgxp_depth_buffer = true;
+      gpu_pgxp_disable_2d = false;
+      gpu_pgxp_transparent_depth = true;
+    }
+  }
+
   if (pcdrv_enable && pcdrv_root.empty() && display_osd_messages)
   {
     Host::AddKeyedOSDMessage(OSDMessageType::Warning, "pcdrv_disabled_no_root",
