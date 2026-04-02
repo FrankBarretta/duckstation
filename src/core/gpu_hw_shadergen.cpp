@@ -1328,12 +1328,25 @@ std::string GPU_HW_ShaderGen::GenerateBatchFragmentShader(
 int3 ApplyDithering(int2 coord, int3 icol)
 {
   #if (DITHERING_SCALED != 0 || UPSCALED == 0)
-    int2 fc = coord & int2(3, 3);
+    #if API_D3D9
+      int2 fc = coord - ((coord / 4) * 4);
+    #else
+      int2 fc = coord & int2(3, 3);
+    #endif
   #else
-    int2 fc = int2(float2(coord) * u_rcp_resolution_scale) & int2(3, 3);
+    #if API_D3D9
+      int2 scaled_coord = int2(float2(coord) * u_rcp_resolution_scale);
+      int2 fc = scaled_coord - ((scaled_coord / 4) * 4);
+    #else
+      int2 fc = int2(float2(coord) * u_rcp_resolution_scale) & int2(3, 3);
+    #endif
   #endif
   int offset = s_dither_values[(fc.y * 4) + fc.x];
-  return clamp((icol + offset) >> 3, 0, 31);
+  #if API_D3D9
+    return clamp((icol + offset) / 8, 0, 31);
+  #else
+    return clamp((icol + offset) >> 3, 0, 31);
+  #endif
 }
 
 #if TEXTURED
@@ -1605,11 +1618,19 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
 
   #if INTERLACING
     #if INTERLACING_SCALED || !UPSCALED
-      if ((fragpos.y & 1) == int(u_interlaced_displayed_field))
-        discard;
+      #if API_D3D9
+        if ((fragpos.y % 2) == int(u_interlaced_displayed_field))
+      #else
+        if ((fragpos.y & 1) == int(u_interlaced_displayed_field))
+      #endif
+          discard;
     #else
-      if ((int(v_pos.y * u_rcp_resolution_scale) & 1) == int(u_interlaced_displayed_field))
-        discard;
+      #if API_D3D9
+        if ((int(v_pos.y * u_rcp_resolution_scale) % 2) == int(u_interlaced_displayed_field))
+      #else
+        if ((int(v_pos.y * u_rcp_resolution_scale) & 1) == int(u_interlaced_displayed_field))
+      #endif
+          discard;
     #endif
   #endif
 
@@ -1623,7 +1644,11 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
       ialpha = 1.0;
     #elif TEXTURE_FILTERING
       #if PAGE_TEXTURE
+      #if API_D3D9
+        FilteredSampleFromVRAM(VECTOR_BROADCAST(TEXPAGE_VALUE, 0), v_tex0, v_uv_limits, texcol, ialpha);
+      #else
         FilteredSampleFromVRAM(VECTOR_BROADCAST(TEXPAGE_VALUE, 0u), v_tex0, v_uv_limits, texcol, ialpha);
+      #endif
       #else
         FilteredSampleFromVRAM(v_texpage, v_tex0, v_uv_limits, texcol, ialpha);
       #endif
@@ -1695,7 +1720,11 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
       icolor = ApplyDithering(fragpos, icolor);
     #else
       #if !TRUE_COLOR
-        icolor >>= 3;
+        #if API_D3D9
+          icolor = icolor / 8;
+        #else
+          icolor >>= 3;
+        #endif
       #endif
     #endif
 
@@ -1882,9 +1911,18 @@ std::string GPU_HW_ShaderGen::GenerateVRAMExtractFragmentShader(u32 resolution_s
   DefineMacro(ss, "COLOR_24BIT", color_24bit);
   DefineMacro(ss, "DEPTH_BUFFER", depth_buffer);
   DefineMacro(ss, "MULTISAMPLING", msaa);
-  ss << "CONSTANT uint RESOLUTION_SCALE = " << resolution_scale << "u;\n";
-  ss << "CONSTANT uint2 VRAM_SIZE = uint2(" << VRAM_WIDTH << ", " << VRAM_HEIGHT << ") * RESOLUTION_SCALE;\n";
-  ss << "CONSTANT uint MULTISAMPLES = " << multisamples << "u;\n";
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    ss << "CONSTANT int RESOLUTION_SCALE = " << resolution_scale << ";\n";
+    ss << "CONSTANT int2 VRAM_SIZE = int2(" << VRAM_WIDTH << ", " << VRAM_HEIGHT << ") * RESOLUTION_SCALE;\n";
+    ss << "CONSTANT int MULTISAMPLES = " << multisamples << ";\n";
+  }
+  else
+  {
+    ss << "CONSTANT uint RESOLUTION_SCALE = " << resolution_scale << "u;\n";
+    ss << "CONSTANT uint2 VRAM_SIZE = uint2(" << VRAM_WIDTH << ", " << VRAM_HEIGHT << ") * RESOLUTION_SCALE;\n";
+    ss << "CONSTANT uint MULTISAMPLES = " << multisamples << "u;\n";
+  }
 
   DeclareUniformBuffer(ss, {"uint2 u_vram_offset", "float u_skip_x", "float u_line_skip"}, true);
   DeclareTexture(ss, "samp0", 0, msaa);
@@ -1894,8 +1932,8 @@ std::string GPU_HW_ShaderGen::GenerateVRAMExtractFragmentShader(u32 resolution_s
   // For D3D9 LOAD_TEXTURE normalization
   if (m_render_api == RenderAPI::D3D9)
   {
-    ss << "CONSTANT float2 RCP_VRAM_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << "u * RESOLUTION_SCALE), "
-       << "1.0 / float(" << VRAM_HEIGHT << "u * RESOLUTION_SCALE));\n";
+    ss << "CONSTANT float2 RCP_VRAM_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << " * RESOLUTION_SCALE), "
+       << "1.0 / float(" << VRAM_HEIGHT << " * RESOLUTION_SCALE));\n";
   }
 
   ss << R"(
@@ -2113,8 +2151,16 @@ std::string GPU_HW_ShaderGen::GenerateVRAMReadFragmentShader(u32 resolution_scal
   WriteColorConversionFunctions(ss);
 
   DefineMacro(ss, "MULTISAMPLING", msaa);
-  ss << "CONSTANT uint RESOLUTION_SCALE = " << resolution_scale << "u;\n";
-  ss << "CONSTANT uint MULTISAMPLES = " << multisamples << "u;\n";
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    ss << "CONSTANT int RESOLUTION_SCALE = " << resolution_scale << ";\n";
+    ss << "CONSTANT int MULTISAMPLES = " << multisamples << ";\n";
+  }
+  else
+  {
+    ss << "CONSTANT uint RESOLUTION_SCALE = " << resolution_scale << "u;\n";
+    ss << "CONSTANT uint MULTISAMPLES = " << multisamples << "u;\n";
+  }
 
   DeclareUniformBuffer(ss, {"uint2 u_base_coords", "uint2 u_size"}, true);
   DeclareTexture(ss, "samp0", 0, msaa);
@@ -2122,8 +2168,8 @@ std::string GPU_HW_ShaderGen::GenerateVRAMReadFragmentShader(u32 resolution_scal
   // For D3D9 LOAD_TEXTURE normalization
   if (m_render_api == RenderAPI::D3D9)
   {
-    ss << "CONSTANT float2 RCP_VRAM_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << "u * RESOLUTION_SCALE), "
-       << "1.0 / float(" << VRAM_HEIGHT << "u * RESOLUTION_SCALE));\n";
+    ss << "CONSTANT float2 RCP_VRAM_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << " * RESOLUTION_SCALE), "
+       << "1.0 / float(" << VRAM_HEIGHT << " * RESOLUTION_SCALE));\n";
   }
 
   ss << R"(
@@ -2610,29 +2656,37 @@ std::string GPU_HW_ShaderGen::GenerateBoxSampleDownsampleFragmentShader(u32 fact
   DeclareUniformBuffer(ss, {"uint2 u_base_coords"}, true);
   DeclareTexture(ss, "samp0", 0, false);
 
-  ss << "CONSTANT uint FACTOR = " << factor << "u;\n";
+  if (m_render_api == RenderAPI::D3D9)
+    ss << "CONSTANT int FACTOR = " << factor << ";\n";
+  else
+    ss << "CONSTANT uint FACTOR = " << factor << "u;\n";
 
   // For D3D9 LOAD_TEXTURE normalization
   if (m_render_api == RenderAPI::D3D9)
   {
-    ss << "CONSTANT float2 RCP_SRC_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << "u * FACTOR), "
-       << "1.0 / float(" << VRAM_HEIGHT << "u * FACTOR));\n";
+    ss << "CONSTANT float2 RCP_SRC_TEXTURE_SIZE = float2(1.0 / float(" << VRAM_WIDTH << " * FACTOR), "
+       << "1.0 / float(" << VRAM_HEIGHT << " * FACTOR));\n";
   }
 
   DeclareFragmentEntryPoint(ss, 0, 1, {}, true);
   ss << R"(
 {
   float3 color = float3(0.0, 0.0, 0.0);
+#if API_D3D9
+  int2 base_coords = int2(u_base_coords) + int2(v_pos.xy) * int2(FACTOR, FACTOR);
+  for (int offset_x = 0; offset_x < FACTOR; offset_x++)
+  {
+    for (int offset_y = 0; offset_y < FACTOR; offset_y++)
+      color += SAMPLE_TEXTURE_LEVEL(samp0, (float2(base_coords + int2(offset_x, offset_y)) + float2(0.5, 0.5)) * RCP_SRC_TEXTURE_SIZE, 0.0).rgb;
+  }
+#else
   uint2 base_coords = u_base_coords + uint2(v_pos.xy) * uint2(FACTOR, FACTOR);
   for (uint offset_x = 0u; offset_x < FACTOR; offset_x++)
   {
     for (uint offset_y = 0u; offset_y < FACTOR; offset_y++)
-#if API_D3D9
-      color += SAMPLE_TEXTURE_LEVEL(samp0, (float2(base_coords + uint2(offset_x, offset_y)) + float2(0.5, 0.5)) * RCP_SRC_TEXTURE_SIZE, 0.0).rgb;
-#else
       color += LOAD_TEXTURE(samp0, int2(base_coords + uint2(offset_x, offset_y)), 0).rgb;
-#endif
   }
+#endif
   color /= float(FACTOR * FACTOR);
   o_col0 = float4(color, 1.0);
 }

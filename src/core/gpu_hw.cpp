@@ -756,6 +756,20 @@ void GPU_HW::CheckSettings()
     m_allow_sprite_mode = ShouldAllowSpriteMode(m_resolution_scale, m_texture_filtering, m_sprite_texture_filtering);
   }
 
+  // D3D9 SM3.0 can't handle the complex uint/bitwise ops in Scale2x/Scale3x/MMPX/MMPXEnhanced texture filters.
+  if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9 &&
+      (m_texture_filtering >= GPUTextureFilter::Scale2x || m_sprite_texture_filtering >= GPUTextureFilter::Scale2x))
+  {
+    Host::AddIconOSDMessage(
+      OSDMessageType::Error, "TextureFilterUnsupported", ICON_EMOJI_WARNING,
+      fmt::format(TRANSLATE_FS("GPU_HW", "Texture filter '{}/{}' is not supported with the D3D9 renderer."),
+                  Settings::GetTextureFilterDisplayName(m_texture_filtering),
+                  Settings::GetTextureFilterName(m_sprite_texture_filtering)));
+    m_texture_filtering = GPUTextureFilter::Nearest;
+    m_sprite_texture_filtering = GPUTextureFilter::Nearest;
+    m_allow_sprite_mode = ShouldAllowSpriteMode(m_resolution_scale, m_texture_filtering, m_sprite_texture_filtering);
+  }
+
   if (g_gpu_settings.IsUsingShaderBlending() && !m_supports_framebuffer_fetch && !features.feedback_loops &&
       !features.raster_order_views)
   {
@@ -793,6 +807,14 @@ void GPU_HW::CheckSettings()
       OSDMessageType::Warning, "GeometryShadersUnsupported", ICON_EMOJI_WARNING,
       TRANSLATE("GPU_HW", "Geometry shaders are not supported by your GPU, and are required for wireframe rendering."));
     m_wireframe_mode = GPUWireframeMode::Disabled;
+  }
+
+  if (m_downsample_mode == GPUDownsampleMode::Adaptive && g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+  {
+    Host::AddIconOSDMessage(
+      OSDMessageType::Warning, "AdaptiveDownsampleUnsupported", ICON_FA_PAINTBRUSH,
+      TRANSLATE_STR("GPU_HW", "Adaptive downsampling is not supported with the D3D9 renderer, using box filter."));
+    m_downsample_mode = GPUDownsampleMode::Box;
   }
 
   if (m_downsample_mode == GPUDownsampleMode::Box)
