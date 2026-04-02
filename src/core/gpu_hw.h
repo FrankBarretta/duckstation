@@ -11,6 +11,7 @@
 #include "common/dimensional_array.h"
 #include "common/gsvector.h"
 
+#include <array>
 #include <limits>
 #include <tuple>
 #include <utility>
@@ -147,12 +148,26 @@ private:
     float v;
   };
 
+  enum class RTXRemixTextureMode : u32
+  {
+    None = 0,
+    DecodedPage = 1,
+    Palette4BitVRAM = 2,
+    Palette8BitVRAM = 3,
+    Direct16BitVRAM = 4,
+  };
+
   struct RTXRemixReplayDraw
   {
     u64 hash = 0;
     u32 last_seen_frame = 0;
     bool use_texture = false;
+    RTXRemixTextureMode texture_mode = RTXRemixTextureMode::None;
     GPUTexture* texture = nullptr;
+    std::unique_ptr<GPUTexture> owned_texture; // snapshot for render-target sources
+    std::array<u32, 4> uv_rect = {{0u, 0u, 255u, 255u}};
+    std::array<u32, 4> texpage_info = {{0u, 0u, 0u, 0u}};
+    std::array<u32, 4> texture_window = {{255u, 255u, 0u, 0u}};
     std::vector<RTXRemixVertex> vertices;
   };
 

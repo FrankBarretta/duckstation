@@ -141,12 +141,77 @@ ALWAYS_INLINE static u64 ComputeRTXRemixReplayHash(GPUTexture* texture, const vo
   return hash;
 }
 
+ALWAYS_INLINE static void AppendRTXRemixReplayHash(u64* hash, const void* data, size_t size)
+{
+  constexpr u64 prime = 1099511628211ull;
+
+  const u8* const bytes = static_cast<const u8*>(data);
+  for (size_t i = 0; i < size; i++)
+  {
+    *hash ^= bytes[i];
+    *hash *= prime;
+  }
+}
+
 ALWAYS_INLINE static u64 ComputeRTXRemixReplayHash(bool use_texture, GPUTexture* texture, const void* vertex_data,
-                                                   size_t vertex_size)
+                                                   size_t vertex_size, const void* replay_state,
+                                                   size_t replay_state_size)
 {
   u64 hash = ComputeRTXRemixReplayHash(texture, vertex_data, vertex_size);
+  if (replay_state && replay_state_size > 0)
+    AppendRTXRemixReplayHash(&hash, replay_state, replay_state_size);
   hash ^= use_texture ? 0x9E3779B97F4A7C15ull : 0xC2B2AE3D27D4EB4Full;
   return hash;
+}
+
+ALWAYS_INLINE static GPUTextureMode GetRTXRemixFallbackGPUTextureMode(GPU_HW::BatchTextureMode mode)
+{
+  switch (mode)
+  {
+    case GPU_HW::BatchTextureMode::Palette4Bit:
+    case GPU_HW::BatchTextureMode::SpritePalette4Bit:
+      return GPUTextureMode::Palette4Bit;
+
+    case GPU_HW::BatchTextureMode::Palette8Bit:
+    case GPU_HW::BatchTextureMode::SpritePalette8Bit:
+      return GPUTextureMode::Palette8Bit;
+
+    case GPU_HW::BatchTextureMode::Direct16Bit:
+    case GPU_HW::BatchTextureMode::SpriteDirect16Bit:
+      return GPUTextureMode::Direct16Bit;
+
+    default:
+      return GPUTextureMode::Direct16Bit;
+  }
+}
+
+ALWAYS_INLINE static u32 GetRTXRemixTextureMode(bool has_decoded_texture, GPUTextureMode mode)
+{
+  if (has_decoded_texture)
+    return 1u;
+
+  switch (mode)
+  {
+    case GPUTextureMode::Palette4Bit:
+      return 2u;
+
+    case GPUTextureMode::Palette8Bit:
+      return 3u;
+
+    case GPUTextureMode::Direct16Bit:
+    case GPUTextureMode::Reserved_Direct16Bit:
+      return 4u;
+
+    default:
+      return 0u;
+  }
+}
+
+ALWAYS_INLINE static std::array<u32, 4> DecodeRTXRemixTexpageInfo(u32 texpage)
+{
+  const u32 texpage_lo = (texpage & 0xFFFFu);
+  const u32 texpage_hi = (texpage >> 16);
+  return {{(texpage_lo & 15u) * 64u, ((texpage_lo >> 4) & 1u) * 256u, (texpage_hi & 63u) * 16u, texpage_hi >> 6}};
 }
 
 ALWAYS_INLINE static bool ShouldDrawWithSoftwareRenderer()
@@ -1911,13 +1976,83 @@ void main(in float4 a_pos : POSITION0, in float4 a_col0 : COLOR0, in float2 a_te
   )";
 
   static constexpr const char* replay_fs = R"(
-float4 u_dummy0 : register(c0);
+float4 u_texture_window : register(c0);
+float4 u_uv_rect : register(c1);
+float4 u_texpage_info : register(c2);
+float4 u_replay_params : register(c3);
 sampler2D samp0 : register(s0);
+
+static const float2 RCP_VRAM_SIZE = float2(1.0 / 1024.0, 1.0 / 512.0);
+static const float4 TRANSPARENT_PIXEL_COLOR = float4(0.0, 0.0, 0.0, 0.0);
+
+int RGBA8ToRGBA5551(float4 texel)
+{
+  const int r = int(texel.r * 255.0 + 0.5);
+  const int g = int(texel.g * 255.0 + 0.5);
+  const int b = int(texel.b * 255.0 + 0.5);
+  const int a = int(texel.a * 255.0 + 0.5);
+  const int r5 = (r / 8) % 32;
+  const int g5 = (g / 8) % 32;
+  const int b5 = (b / 8) % 32;
+  const int a1 = (a >= 128) ? 1 : 0;
+  return r5 + (g5 * 32) + (b5 * 1024) + (a1 * 32768);
+}
+
+float4 SampleDecodedPage(float2 coords)
+{
+  // UVs are pre-normalized [0,1] with texture window already applied on CPU
+  return tex2Dlod(samp0, float4(coords, 0.0, 0.0));
+}
+
+float4 SampleRawVRAM(float2 coords, int replay_mode)
+{
+  // Convert from normalized [0,1] back to texel space [0,255]
+  const int2 icoord = int2(floor(coords * 256.0));
+  const int base_x = int(u_texpage_info.x + 0.5);
+  const int base_y = int(u_texpage_info.y + 0.5);
+  const int palette_x = int(u_texpage_info.z + 0.5);
+  const int palette_y = int(u_texpage_info.w + 0.5);
+
+  if (replay_mode == 2)
+  {
+    const int2 vicoord = int2(base_x + (icoord.x / 4), base_y + icoord.y);
+    const float2 raw_uv = (float2(vicoord) + float2(0.5, 0.5)) * RCP_VRAM_SIZE;
+    const int vram_value = RGBA8ToRGBA5551(tex2Dlod(samp0, float4(raw_uv, 0.0, 0.0)));
+    const int subpixel = icoord.x % 4;
+    const int palette_divisor = (subpixel == 0) ? 1 : ((subpixel == 1) ? 16 : ((subpixel == 2) ? 256 : 4096));
+    const int palette_index = (vram_value / palette_divisor) % 16;
+    const int2 palette_coord = int2(palette_x + palette_index, palette_y);
+    const float2 palette_uv = (float2(palette_coord) + float2(0.5, 0.5)) * RCP_VRAM_SIZE;
+    return tex2Dlod(samp0, float4(palette_uv, 0.0, 0.0));
+  }
+
+  if (replay_mode == 3)
+  {
+    const int2 vicoord = int2((base_x + (icoord.x / 2)) % 1024, base_y + icoord.y);
+    const float2 raw_uv = (float2(vicoord) + float2(0.5, 0.5)) * RCP_VRAM_SIZE;
+    const int vram_value = RGBA8ToRGBA5551(tex2Dlod(samp0, float4(raw_uv, 0.0, 0.0)));
+    const int subpixel = icoord.x % 2;
+    const int palette_divisor = (subpixel == 0) ? 1 : 256;
+    const int palette_index = (vram_value / palette_divisor) % 256;
+    const int2 palette_coord = int2((palette_x + palette_index) % 1024, palette_y);
+    const float2 palette_uv = (float2(palette_coord) + float2(0.5, 0.5)) * RCP_VRAM_SIZE;
+    return tex2Dlod(samp0, float4(palette_uv, 0.0, 0.0));
+  }
+
+  const int2 vicoord = int2((base_x + icoord.x) % 1024, (base_y + icoord.y) % 512);
+  const float2 raw_uv = (float2(vicoord) + float2(0.5, 0.5)) * RCP_VRAM_SIZE;
+  return tex2Dlod(samp0, float4(raw_uv, 0.0, 0.0));
+}
 
 float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
 {
-  float4 tex = tex2D(samp0, v_tex0);
-  return float4(saturate(v_col0.rgb * tex.rgb), 1.0f);
+  const int replay_mode = int(u_replay_params.x + 0.5);
+  float4 tex = (replay_mode == 1) ? SampleDecodedPage(v_tex0) : SampleRawVRAM(v_tex0, replay_mode);
+  if (tex.r == TRANSPARENT_PIXEL_COLOR.r && tex.g == TRANSPARENT_PIXEL_COLOR.g && tex.b == TRANSPARENT_PIXEL_COLOR.b &&
+      tex.a == TRANSPARENT_PIXEL_COLOR.a)
+    discard;
+
+  return float4(saturate(v_col0.rgb * tex.rgb), tex.a);
 }
   )";
 
@@ -1926,7 +2061,7 @@ float4 u_dummy0 : register(c0);
 
 float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
 {
-  return float4(saturate(v_col0.rgb), 1.0f);
+  return float4(saturate(v_col0.rgb), saturate(v_col0.a));
 }
   )";
 
@@ -1962,7 +2097,7 @@ float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
   plconfig.primitive = GPUPipeline::Primitive::Triangles;
   plconfig.depth = GPUPipeline::DepthState::GetNoTestsState();
   plconfig.blend = GPUPipeline::BlendState::GetNoBlendingState();
-  plconfig.blend.write_mask = 0x7;
+  plconfig.blend.write_mask = 0xF;
   plconfig.vertex_shader = vs.get();
   plconfig.geometry_shader = nullptr;
   plconfig.fragment_shader = fs.get();
@@ -2363,13 +2498,6 @@ void GPU_HW::ReplayCachedRTXRemixDraw(const RTXRemixReplayDraw& draw)
     return;
 
   const BatchUBOData old_ubo = m_batch_ubo_data;
-  BatchUBOData replay_ubo = old_ubo;
-  replay_ubo.u_rtx_remix_offset_x = 0.0f;
-  replay_ubo.u_rtx_remix_offset_y = 0.0f;
-  replay_ubo.u_rtx_remix_scale_x = 1.0f;
-  replay_ubo.u_rtx_remix_scale_y = 1.0f;
-  replay_ubo.u_rtx_remix_active = 0;
-
   if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
   {
     struct D3D9BatchUBOData
@@ -2391,7 +2519,7 @@ void GPU_HW::ReplayCachedRTXRemixDraw(const RTXRemixReplayDraw& draw)
     };
     static_assert(sizeof(D3D9BatchUBOData) == sizeof(BatchUBOData));
 
-    const auto upload_d3d9_ubo = [](const BatchUBOData& src) {
+    const auto upload_d3d9_batch_ubo = [](const BatchUBOData& src) {
       D3D9BatchUBOData d3d9_ubo;
       d3d9_ubo.u_texture_window[0] = static_cast<float>(src.u_texture_window[0]);
       d3d9_ubo.u_texture_window[1] = static_cast<float>(src.u_texture_window[1]);
@@ -2415,11 +2543,44 @@ void GPU_HW::ReplayCachedRTXRemixDraw(const RTXRemixReplayDraw& draw)
       g_gpu_device->UploadUniformBuffer(&d3d9_ubo, sizeof(d3d9_ubo));
     };
 
-    upload_d3d9_ubo(replay_ubo);
-  }
-  else
-  {
-    g_gpu_device->UploadUniformBuffer(&replay_ubo, sizeof(replay_ubo));
+    struct RTXRemixReplayConstants
+    {
+      float texture_window[4];
+      float uv_rect[4];
+      float texpage_info[4];
+      float replay_params[4];
+    };
+
+    RTXRemixReplayConstants replay_constants = {};
+    for (u32 i = 0; i < 4; i++)
+    {
+      replay_constants.texture_window[i] = static_cast<float>(draw.texture_window[i]);
+      replay_constants.uv_rect[i] = static_cast<float>(draw.uv_rect[i]);
+      replay_constants.texpage_info[i] = static_cast<float>(draw.texpage_info[i]);
+    }
+    replay_constants.replay_params[0] = static_cast<float>(draw.texture_mode);
+    g_gpu_device->UploadUniformBuffer(&replay_constants, sizeof(replay_constants));
+
+    g_gpu_device->SetPipeline(draw.use_texture ? m_rtx_remix_textured_pipeline.get() : m_rtx_remix_untextured_pipeline.get());
+    g_gpu_device->SetTextureSampler(0, draw.use_texture ? draw.texture : g_gpu_device->GetEmptyTexture(),
+                                    g_gpu_device->GetNearestSampler());
+    g_gpu_device->SetRenderTarget(nullptr, nullptr);
+    g_gpu_device->SetViewportAndScissor(0, 0, static_cast<s32>(swap_chain->GetWidth()),
+                                        static_cast<s32>(swap_chain->GetHeight()));
+
+    u32 replay_base_vertex;
+    g_gpu_device->UploadVertexBuffer(draw.vertices.data(), sizeof(RTXRemixVertex),
+                                     static_cast<u32>(draw.vertices.size()), &replay_base_vertex);
+
+    g_gpu_device->BeginRTXRemixShadowDraw();
+    g_gpu_device->Draw(static_cast<u32>(draw.vertices.size()), replay_base_vertex);
+    g_gpu_device->EndRTXRemixShadowDraw();
+
+    upload_d3d9_batch_ubo(old_ubo);
+    SetVRAMRenderTarget();
+    g_gpu_device->SetViewport(m_vram_texture->GetRect());
+    SetScissor();
+    return;
   }
 
   g_gpu_device->SetPipeline(draw.use_texture ? m_rtx_remix_textured_pipeline.get() : m_rtx_remix_untextured_pipeline.get());
@@ -2436,53 +2597,6 @@ void GPU_HW::ReplayCachedRTXRemixDraw(const RTXRemixReplayDraw& draw)
   g_gpu_device->BeginRTXRemixShadowDraw();
   g_gpu_device->Draw(static_cast<u32>(draw.vertices.size()), replay_base_vertex);
   g_gpu_device->EndRTXRemixShadowDraw();
-
-  if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
-  {
-    struct D3D9BatchUBOData
-    {
-      float u_texture_window[4];
-      float u_src_alpha_factor;
-      float u_dst_alpha_factor;
-      float u_interlaced_displayed_field;
-      float u_set_mask_while_drawing;
-      float u_resolution_scale;
-      float u_rcp_resolution_scale;
-      float u_resolution_scale_minus_one;
-      float u_rtx_remix_offset_x;
-      float u_rtx_remix_offset_y;
-      float u_rtx_remix_scale_x;
-      float u_rtx_remix_scale_y;
-      float u_rtx_remix_active;
-      float u_rtx_remix_padding[3];
-    };
-    static_assert(sizeof(D3D9BatchUBOData) == sizeof(BatchUBOData));
-    D3D9BatchUBOData d3d9_ubo;
-    d3d9_ubo.u_texture_window[0] = static_cast<float>(old_ubo.u_texture_window[0]);
-    d3d9_ubo.u_texture_window[1] = static_cast<float>(old_ubo.u_texture_window[1]);
-    d3d9_ubo.u_texture_window[2] = static_cast<float>(old_ubo.u_texture_window[2]);
-    d3d9_ubo.u_texture_window[3] = static_cast<float>(old_ubo.u_texture_window[3]);
-    d3d9_ubo.u_src_alpha_factor = old_ubo.u_src_alpha_factor;
-    d3d9_ubo.u_dst_alpha_factor = old_ubo.u_dst_alpha_factor;
-    d3d9_ubo.u_interlaced_displayed_field = static_cast<float>(old_ubo.u_interlaced_displayed_field);
-    d3d9_ubo.u_set_mask_while_drawing = static_cast<float>(old_ubo.u_set_mask_while_drawing);
-    d3d9_ubo.u_resolution_scale = old_ubo.u_resolution_scale;
-    d3d9_ubo.u_rcp_resolution_scale = old_ubo.u_rcp_resolution_scale;
-    d3d9_ubo.u_resolution_scale_minus_one = old_ubo.u_resolution_scale_minus_one;
-    d3d9_ubo.u_rtx_remix_offset_x = old_ubo.u_rtx_remix_offset_x;
-    d3d9_ubo.u_rtx_remix_offset_y = old_ubo.u_rtx_remix_offset_y;
-    d3d9_ubo.u_rtx_remix_scale_x = old_ubo.u_rtx_remix_scale_x;
-    d3d9_ubo.u_rtx_remix_scale_y = old_ubo.u_rtx_remix_scale_y;
-    d3d9_ubo.u_rtx_remix_active = static_cast<float>(old_ubo.u_rtx_remix_active);
-    d3d9_ubo.u_rtx_remix_padding[0] = static_cast<float>(old_ubo.u_rtx_remix_padding[0]);
-    d3d9_ubo.u_rtx_remix_padding[1] = static_cast<float>(old_ubo.u_rtx_remix_padding[1]);
-    d3d9_ubo.u_rtx_remix_padding[2] = static_cast<float>(old_ubo.u_rtx_remix_padding[2]);
-    g_gpu_device->UploadUniformBuffer(&d3d9_ubo, sizeof(d3d9_ubo));
-  }
-  else
-  {
-    g_gpu_device->UploadUniformBuffer(&old_ubo, sizeof(old_ubo));
-  }
 
   SetVRAMRenderTarget();
   g_gpu_device->SetViewport(m_vram_texture->GetRect());
@@ -2504,45 +2618,92 @@ void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num
 
   const GPUTextureCache::Source* const replay_source = m_rtx_remix_source ? m_rtx_remix_source : texture;
   GPUTexture* remix_texture = nullptr;
-  BatchTextureMode remix_texture_mode = m_batch.texture_mode;
+  const GPUTextureMode fallback_texture_mode =
+    (m_use_texture_cache ? m_texture_cache_key.mode : GetRTXRemixFallbackGPUTextureMode(m_batch.texture_mode));
   if (m_use_texture_cache && m_batch.texture_mode != BatchTextureMode::Disabled)
     remix_texture = replay_source ? replay_source->texture : m_vram_read_texture.get();
 
+  // For RTX Remix, also accept render-target textures from the cache. They contain valid
+  // decoded content at draw time, and Remix needs a real texture to capture materials.
   const bool has_decoded_texture =
-    (replay_source && replay_source->texture && !replay_source->texture->IsRenderTargetOrDepthStencil() &&
+    (replay_source && replay_source->texture &&
      m_batch.texture_mode != BatchTextureMode::Disabled);
   if (has_decoded_texture)
   {
     remix_texture = replay_source->texture;
-    remix_texture_mode = m_batch.sprite_mode ? BatchTextureMode::SpritePageTexture : BatchTextureMode::PageTexture;
+  }
+  else if (m_batch.texture_mode != BatchTextureMode::Disabled)
+  {
+    remix_texture = m_vram_read_texture.get();
   }
   else if (!remix_texture)
   {
     remix_texture = g_gpu_device->GetEmptyTexture();
-    remix_texture_mode = BatchTextureMode::Disabled;
   }
-
-  const BatchRenderMode remix_render_mode =
-    (render_mode == BatchRenderMode::ShaderBlend) ? m_batch.GetRenderMode() : render_mode;
-  const u8 depth_test = BoolToUInt8(m_batch.use_depth_buffer);
-  const u8 check_mask = 0;
-  const u8 texture_mode =
-    (static_cast<u8>(remix_texture_mode) +
-     ((remix_texture_mode < BatchTextureMode::Disabled && m_batch.sprite_mode) ?
-        static_cast<u8>(BatchTextureMode::SpriteStart) :
-        0));
 
   const bool queue_replay_draw = !m_rtx_remix_vertices.empty();
   if (queue_replay_draw)
   {
+    struct RTXRemixReplayHashState
+    {
+      RTXRemixTextureMode texture_mode;
+      u32 padding = 0;
+      std::array<u32, 4> uv_rect;
+      std::array<u32, 4> texpage_info;
+      std::array<u32, 4> texture_window;
+    };
+
     RTXRemixReplayDraw& queued_draw = m_rtx_remix_frame_draws.emplace_back();
     queued_draw.last_seen_frame = System::GetFrameNumber();
-    queued_draw.use_texture = has_decoded_texture;
-    queued_draw.texture = remix_texture;
+    const RTXRemixTextureMode replay_texture_mode = static_cast<RTXRemixTextureMode>(
+      (m_batch.texture_mode != BatchTextureMode::Disabled) ?
+        GetRTXRemixTextureMode(has_decoded_texture, fallback_texture_mode) :
+        0u);
+    queued_draw.texture_mode = replay_texture_mode;
+    queued_draw.use_texture = (replay_texture_mode != RTXRemixTextureMode::None && remix_texture != nullptr);
+    if (!queued_draw.use_texture)
+      queued_draw.texture_mode = RTXRemixTextureMode::None;
+
+    // Snapshot render-target textures so the content is preserved for cached replay.
+    // Hash cache textures are persistent and don't need snapshotting.
+    if (queued_draw.use_texture && remix_texture && remix_texture->IsRenderTargetOrDepthStencil())
+    {
+      auto snapshot = g_gpu_device->FetchTexture(remix_texture->GetWidth(), remix_texture->GetHeight(), 1, 1, 1,
+                                                 GPUTexture::Type::Texture, remix_texture->GetFormat(),
+                                                 GPUTexture::Flags::None);
+      if (snapshot)
+      {
+        g_gpu_device->CopyTextureRegion(snapshot.get(), 0, 0, 0, 0, remix_texture, 0, 0, 0, 0,
+                                        remix_texture->GetWidth(), remix_texture->GetHeight());
+        queued_draw.owned_texture = std::move(snapshot);
+        queued_draw.texture = queued_draw.owned_texture.get();
+        // Force DecodedPage mode since we have a snapshot of the decoded content
+        queued_draw.texture_mode = RTXRemixTextureMode::DecodedPage;
+      }
+    }
+    else
+    {
+      queued_draw.texture = remix_texture;
+    }
+    queued_draw.uv_rect = {{0u, 0u, 255u, 255u}};
+    if (!m_current_uv_rect.eq(INVALID_RECT))
+    {
+      queued_draw.uv_rect = {{static_cast<u32>(std::max(m_current_uv_rect.left, 0)),
+                              static_cast<u32>(std::max(m_current_uv_rect.top, 0)),
+                              static_cast<u32>(std::max(m_current_uv_rect.right, 0)),
+                              static_cast<u32>(std::max(m_current_uv_rect.bottom, 0))}};
+    }
+    queued_draw.texpage_info = m_rtx_remix_batch_vertices.empty() ? std::array<u32, 4>{{0u, 0u, 0u, 0u}} :
+                                                                    DecodeRTXRemixTexpageInfo(m_rtx_remix_batch_vertices.front().texpage);
+    queued_draw.texture_window = {{m_batch_ubo_data.u_texture_window[0], m_batch_ubo_data.u_texture_window[1],
+                                   m_batch_ubo_data.u_texture_window[2], m_batch_ubo_data.u_texture_window[3]}};
     queued_draw.vertices = m_rtx_remix_vertices;
-    queued_draw.hash =
-      ComputeRTXRemixReplayHash(queued_draw.use_texture, queued_draw.texture, queued_draw.vertices.data(),
-                                queued_draw.vertices.size() * sizeof(RTXRemixVertex));
+
+    const RTXRemixReplayHashState hash_state = {queued_draw.texture_mode, 0u, queued_draw.uv_rect,
+                                                queued_draw.texpage_info, queued_draw.texture_window};
+    queued_draw.hash = ComputeRTXRemixReplayHash(
+      queued_draw.use_texture, queued_draw.texture, queued_draw.vertices.data(),
+      queued_draw.vertices.size() * sizeof(RTXRemixVertex), &hash_state, sizeof(hash_state));
     return;
   }
 }
@@ -4443,11 +4604,6 @@ void GPU_HW::FlushRender()
 
   if (m_rtx_remix_mode && !m_rtx_remix_batch_indices.empty() && !m_rtx_remix_batch_vertices.empty())
   {
-    const bool has_decoded_texture =
-      (m_rtx_remix_source && m_rtx_remix_source->texture && !m_rtx_remix_source->texture->IsRenderTargetOrDepthStencil());
-    const GSVector4i texture_rect = has_decoded_texture ? m_rtx_remix_source->texture_rect : GSVector4i::zero();
-    const float texture_width = static_cast<float>(std::max<s32>(texture_rect.width(), 1));
-    const float texture_height = static_cast<float>(std::max<s32>(texture_rect.height(), 1));
     const bool remap_display =
       !m_rtx_remix_display_rect.eq(INVALID_RECT) && m_rtx_remix_display_rect.width() > 0 &&
       m_rtx_remix_display_rect.height() > 0;
@@ -4455,6 +4611,14 @@ void GPU_HW::FlushRender()
       remap_display ? (1024.0f / static_cast<float>(m_rtx_remix_display_rect.width())) : 1.0f;
     const float display_scale_y =
       remap_display ? (512.0f / static_cast<float>(m_rtx_remix_display_rect.height())) : 1.0f;
+
+    // Pre-process UVs: apply PS1 texture window masking and normalize to [0,1].
+    // RTX Remix replaces our pixel shader, so it needs normalized UVs in the vertex data.
+    const bool has_batch_texture = (m_batch.texture_mode != BatchTextureMode::Disabled);
+    const u32 tw_and_x = m_batch_ubo_data.u_texture_window[0];
+    const u32 tw_and_y = m_batch_ubo_data.u_texture_window[1];
+    const u32 tw_or_x = m_batch_ubo_data.u_texture_window[2];
+    const u32 tw_or_y = m_batch_ubo_data.u_texture_window[3];
 
     m_rtx_remix_vertices.reserve(m_rtx_remix_batch_indices.size());
     for (const GPUDevice::DrawIndex index : m_rtx_remix_batch_indices)
@@ -4469,24 +4633,22 @@ void GPU_HW::FlushRender()
       dst.z = src.z;
       dst.w = src.w;
       dst.color = src.color;
-      if (has_decoded_texture)
+
+      if (has_batch_texture)
       {
-        dst.u = (static_cast<float>(src.u) - static_cast<float>(texture_rect.left)) / texture_width;
-        dst.v = (static_cast<float>(src.v) - static_cast<float>(texture_rect.top)) / texture_height;
-        if (dst.u < 0.0f)
-          dst.u = 0.0f;
-        else if (dst.u > 1.0f)
-          dst.u = 1.0f;
-        if (dst.v < 0.0f)
-          dst.v = 0.0f;
-        else if (dst.v > 1.0f)
-          dst.v = 1.0f;
+        // Apply PS1 texture window: result = (coord & and_mask) | or_mask
+        const int u_windowed = (static_cast<int>(src.u) & static_cast<int>(tw_and_x)) | static_cast<int>(tw_or_x);
+        const int v_windowed = (static_cast<int>(src.v) & static_cast<int>(tw_and_y)) | static_cast<int>(tw_or_y);
+        // Normalize to [0, 1] with texel center offset for the 256x256 page texture
+        dst.u = (static_cast<float>(u_windowed) + 0.5f) / 256.0f;
+        dst.v = (static_cast<float>(v_windowed) + 0.5f) / 256.0f;
       }
       else
       {
         dst.u = 0.0f;
         dst.v = 0.0f;
       }
+
       m_rtx_remix_vertices.push_back(dst);
     }
   }
@@ -4629,19 +4791,20 @@ void GPU_HW::UpdateDisplay(const GPUBackendUpdateDisplayCommand* cmd)
   if (m_rtx_remix_mode && !cmd->display_disabled)
   {
     const u32 current_frame = System::GetFrameNumber();
-    for (const RTXRemixReplayDraw& draw : m_rtx_remix_frame_draws)
+    for (RTXRemixReplayDraw& draw : m_rtx_remix_frame_draws)
     {
       auto it = std::find_if(m_rtx_remix_previous_frame_draws.begin(), m_rtx_remix_previous_frame_draws.end(),
                              [&draw](const RTXRemixReplayDraw& existing) { return existing.hash == draw.hash; });
       if (it != m_rtx_remix_previous_frame_draws.end())
       {
         it->texture = draw.texture;
-        it->vertices = draw.vertices;
+        it->owned_texture = std::move(draw.owned_texture);
+        it->vertices = std::move(draw.vertices);
         it->last_seen_frame = current_frame;
       }
       else
       {
-        m_rtx_remix_previous_frame_draws.push_back(draw);
+        m_rtx_remix_previous_frame_draws.push_back(std::move(draw));
       }
     }
 
