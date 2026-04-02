@@ -160,6 +160,12 @@ private:
     float u_resolution_scale;
     float u_rcp_resolution_scale;
     float u_resolution_scale_minus_one;
+    float u_rtx_remix_offset_x;
+    float u_rtx_remix_offset_y;
+    float u_rtx_remix_scale_x;
+    float u_rtx_remix_scale_y;
+    u32 u_rtx_remix_active;
+    u32 u_rtx_remix_padding[3];
   };
 
   struct RendererStats
@@ -332,6 +338,8 @@ private:
   // Texture cache state
   GPUTextureCache::SourceKey m_texture_cache_key = {};
   const GPUTextureCache::Source* m_rtx_remix_source = nullptr;
+  GSVector4i m_rtx_remix_display_rect = INVALID_RECT;
+  GSVector4i m_rtx_remix_batch_draw_rect = INVALID_RECT;
 
   // Bounding box of VRAM area that the GPU has drawn into.
   GSVector4i m_vram_dirty_draw_rect = INVALID_RECT;

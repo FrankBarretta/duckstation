@@ -68,7 +68,9 @@ void GPU_HW_ShaderGen::WriteBatchUniformBuffer(std::stringstream& ss) const
                        {"uint2 u_texture_window_and", "uint2 u_texture_window_or", "float u_src_alpha_factor",
                         "float u_dst_alpha_factor", "uint u_interlaced_displayed_field",
                         "bool u_set_mask_while_drawing", "float u_resolution_scale", "float u_rcp_resolution_scale",
-                        "float u_resolution_scale_minus_one"},
+                        "float u_resolution_scale_minus_one", "float u_rtx_remix_offset_x",
+                        "float u_rtx_remix_offset_y", "float u_rtx_remix_scale_x", "float u_rtx_remix_scale_y",
+                        "uint u_rtx_remix_active", "uint3 u_rtx_remix_padding"},
                        false);
 }
 
@@ -177,9 +179,16 @@ std::string GPU_HW_ShaderGen::GenerateBatchVertexShader(bool upscaled, bool msaa
   // uploading there instead.
   float vertex_offset = (UPSCALED == 0) ? 0.5 : 0.0;
 
+  float2 remix_pos = a_pos.xy;
+  if (u_rtx_remix_active != 0u)
+  {
+    remix_pos.x = (remix_pos.x - u_rtx_remix_offset_x) * u_rtx_remix_scale_x;
+    remix_pos.y = (remix_pos.y - u_rtx_remix_offset_y) * u_rtx_remix_scale_y;
+  }
+
   // 0..+1023 -> -1..1
-  float pos_x = ((a_pos.x + vertex_offset) / 512.0) - 1.0;
-  float pos_y = ((a_pos.y + vertex_offset) / -256.0) + 1.0;
+  float pos_x = ((remix_pos.x + vertex_offset) / 512.0) - 1.0;
+  float pos_y = ((remix_pos.y + vertex_offset) / -256.0) + 1.0;
 
 #if PGXP_DEPTH
   // Ignore mask Z when using PGXP depth.

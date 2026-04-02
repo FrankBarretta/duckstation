@@ -2223,6 +2223,12 @@ void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num
   if (!m_rtx_remix_mode || m_wireframe_mode == GPUWireframeMode::OnlyWireframe)
     return;
 
+  if (!m_rtx_remix_display_rect.eq(INVALID_RECT) && !m_rtx_remix_batch_draw_rect.eq(INVALID_RECT) &&
+      !m_rtx_remix_batch_draw_rect.rintersects(m_rtx_remix_display_rect))
+  {
+    return;
+  }
+
   GPUSwapChain* const swap_chain = g_gpu_device->GetMainSwapChain();
   if (!swap_chain)
     return;
@@ -2264,6 +2270,70 @@ void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num
                                                .get());
   g_gpu_device->SetTextureSampler(0, remix_texture, g_gpu_device->GetNearestSampler());
 
+  const BatchUBOData old_ubo = m_batch_ubo_data;
+  BatchUBOData replay_ubo = old_ubo;
+  if (!m_rtx_remix_display_rect.eq(INVALID_RECT) && m_rtx_remix_display_rect.width() > 0 &&
+      m_rtx_remix_display_rect.height() > 0)
+  {
+    replay_ubo.u_rtx_remix_offset_x = static_cast<float>(m_rtx_remix_display_rect.left);
+    replay_ubo.u_rtx_remix_offset_y = static_cast<float>(m_rtx_remix_display_rect.top);
+    replay_ubo.u_rtx_remix_scale_x = 1024.0f / static_cast<float>(m_rtx_remix_display_rect.width());
+    replay_ubo.u_rtx_remix_scale_y = 512.0f / static_cast<float>(m_rtx_remix_display_rect.height());
+    replay_ubo.u_rtx_remix_active = 1;
+  }
+
+  if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+  {
+    struct D3D9BatchUBOData
+    {
+      float u_texture_window[4];
+      float u_src_alpha_factor;
+      float u_dst_alpha_factor;
+      float u_interlaced_displayed_field;
+      float u_set_mask_while_drawing;
+      float u_resolution_scale;
+      float u_rcp_resolution_scale;
+      float u_resolution_scale_minus_one;
+      float u_rtx_remix_offset_x;
+      float u_rtx_remix_offset_y;
+      float u_rtx_remix_scale_x;
+      float u_rtx_remix_scale_y;
+      float u_rtx_remix_active;
+      float u_rtx_remix_padding[3];
+    };
+    static_assert(sizeof(D3D9BatchUBOData) == sizeof(BatchUBOData));
+
+    const auto upload_d3d9_ubo = [](const BatchUBOData& src) {
+      D3D9BatchUBOData d3d9_ubo;
+      d3d9_ubo.u_texture_window[0] = static_cast<float>(src.u_texture_window[0]);
+      d3d9_ubo.u_texture_window[1] = static_cast<float>(src.u_texture_window[1]);
+      d3d9_ubo.u_texture_window[2] = static_cast<float>(src.u_texture_window[2]);
+      d3d9_ubo.u_texture_window[3] = static_cast<float>(src.u_texture_window[3]);
+      d3d9_ubo.u_src_alpha_factor = src.u_src_alpha_factor;
+      d3d9_ubo.u_dst_alpha_factor = src.u_dst_alpha_factor;
+      d3d9_ubo.u_interlaced_displayed_field = static_cast<float>(src.u_interlaced_displayed_field);
+      d3d9_ubo.u_set_mask_while_drawing = static_cast<float>(src.u_set_mask_while_drawing);
+      d3d9_ubo.u_resolution_scale = src.u_resolution_scale;
+      d3d9_ubo.u_rcp_resolution_scale = src.u_rcp_resolution_scale;
+      d3d9_ubo.u_resolution_scale_minus_one = src.u_resolution_scale_minus_one;
+      d3d9_ubo.u_rtx_remix_offset_x = src.u_rtx_remix_offset_x;
+      d3d9_ubo.u_rtx_remix_offset_y = src.u_rtx_remix_offset_y;
+      d3d9_ubo.u_rtx_remix_scale_x = src.u_rtx_remix_scale_x;
+      d3d9_ubo.u_rtx_remix_scale_y = src.u_rtx_remix_scale_y;
+      d3d9_ubo.u_rtx_remix_active = static_cast<float>(src.u_rtx_remix_active);
+      d3d9_ubo.u_rtx_remix_padding[0] = static_cast<float>(src.u_rtx_remix_padding[0]);
+      d3d9_ubo.u_rtx_remix_padding[1] = static_cast<float>(src.u_rtx_remix_padding[1]);
+      d3d9_ubo.u_rtx_remix_padding[2] = static_cast<float>(src.u_rtx_remix_padding[2]);
+      g_gpu_device->UploadUniformBuffer(&d3d9_ubo, sizeof(d3d9_ubo));
+    };
+
+    upload_d3d9_ubo(replay_ubo);
+  }
+  else
+  {
+    g_gpu_device->UploadUniformBuffer(&replay_ubo, sizeof(replay_ubo));
+  }
+
   g_gpu_device->SetRenderTarget(nullptr, nullptr);
   g_gpu_device->SetViewportAndScissor(0, 0, static_cast<s32>(swap_chain->GetWidth()),
                                       static_cast<s32>(swap_chain->GetHeight()));
@@ -2271,6 +2341,53 @@ void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num
   g_gpu_device->BeginRTXRemixShadowDraw();
   g_gpu_device->DrawIndexed(num_indices, base_index, base_vertex);
   g_gpu_device->EndRTXRemixShadowDraw();
+
+  if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
+  {
+    struct D3D9BatchUBOData
+    {
+      float u_texture_window[4];
+      float u_src_alpha_factor;
+      float u_dst_alpha_factor;
+      float u_interlaced_displayed_field;
+      float u_set_mask_while_drawing;
+      float u_resolution_scale;
+      float u_rcp_resolution_scale;
+      float u_resolution_scale_minus_one;
+      float u_rtx_remix_offset_x;
+      float u_rtx_remix_offset_y;
+      float u_rtx_remix_scale_x;
+      float u_rtx_remix_scale_y;
+      float u_rtx_remix_active;
+      float u_rtx_remix_padding[3];
+    };
+    static_assert(sizeof(D3D9BatchUBOData) == sizeof(BatchUBOData));
+    D3D9BatchUBOData d3d9_ubo;
+    d3d9_ubo.u_texture_window[0] = static_cast<float>(old_ubo.u_texture_window[0]);
+    d3d9_ubo.u_texture_window[1] = static_cast<float>(old_ubo.u_texture_window[1]);
+    d3d9_ubo.u_texture_window[2] = static_cast<float>(old_ubo.u_texture_window[2]);
+    d3d9_ubo.u_texture_window[3] = static_cast<float>(old_ubo.u_texture_window[3]);
+    d3d9_ubo.u_src_alpha_factor = old_ubo.u_src_alpha_factor;
+    d3d9_ubo.u_dst_alpha_factor = old_ubo.u_dst_alpha_factor;
+    d3d9_ubo.u_interlaced_displayed_field = static_cast<float>(old_ubo.u_interlaced_displayed_field);
+    d3d9_ubo.u_set_mask_while_drawing = static_cast<float>(old_ubo.u_set_mask_while_drawing);
+    d3d9_ubo.u_resolution_scale = old_ubo.u_resolution_scale;
+    d3d9_ubo.u_rcp_resolution_scale = old_ubo.u_rcp_resolution_scale;
+    d3d9_ubo.u_resolution_scale_minus_one = old_ubo.u_resolution_scale_minus_one;
+    d3d9_ubo.u_rtx_remix_offset_x = old_ubo.u_rtx_remix_offset_x;
+    d3d9_ubo.u_rtx_remix_offset_y = old_ubo.u_rtx_remix_offset_y;
+    d3d9_ubo.u_rtx_remix_scale_x = old_ubo.u_rtx_remix_scale_x;
+    d3d9_ubo.u_rtx_remix_scale_y = old_ubo.u_rtx_remix_scale_y;
+    d3d9_ubo.u_rtx_remix_active = static_cast<float>(old_ubo.u_rtx_remix_active);
+    d3d9_ubo.u_rtx_remix_padding[0] = static_cast<float>(old_ubo.u_rtx_remix_padding[0]);
+    d3d9_ubo.u_rtx_remix_padding[1] = static_cast<float>(old_ubo.u_rtx_remix_padding[1]);
+    d3d9_ubo.u_rtx_remix_padding[2] = static_cast<float>(old_ubo.u_rtx_remix_padding[2]);
+    g_gpu_device->UploadUniformBuffer(&d3d9_ubo, sizeof(d3d9_ubo));
+  }
+  else
+  {
+    g_gpu_device->UploadUniformBuffer(&old_ubo, sizeof(old_ubo));
+  }
 
   if (m_use_texture_cache && m_batch.texture_mode != BatchTextureMode::Disabled)
   {
@@ -4184,6 +4301,12 @@ void GPU_HW::FlushRender()
         float u_resolution_scale;
         float u_rcp_resolution_scale;
         float u_resolution_scale_minus_one;
+        float u_rtx_remix_offset_x;
+        float u_rtx_remix_offset_y;
+        float u_rtx_remix_scale_x;
+        float u_rtx_remix_scale_y;
+        float u_rtx_remix_active;
+        float u_rtx_remix_padding[3];
       };
       static_assert(sizeof(D3D9BatchUBOData) == sizeof(BatchUBOData));
 
@@ -4199,6 +4322,14 @@ void GPU_HW::FlushRender()
       d3d9_ubo.u_resolution_scale = m_batch_ubo_data.u_resolution_scale;
       d3d9_ubo.u_rcp_resolution_scale = m_batch_ubo_data.u_rcp_resolution_scale;
       d3d9_ubo.u_resolution_scale_minus_one = m_batch_ubo_data.u_resolution_scale_minus_one;
+      d3d9_ubo.u_rtx_remix_offset_x = m_batch_ubo_data.u_rtx_remix_offset_x;
+      d3d9_ubo.u_rtx_remix_offset_y = m_batch_ubo_data.u_rtx_remix_offset_y;
+      d3d9_ubo.u_rtx_remix_scale_x = m_batch_ubo_data.u_rtx_remix_scale_x;
+      d3d9_ubo.u_rtx_remix_scale_y = m_batch_ubo_data.u_rtx_remix_scale_y;
+      d3d9_ubo.u_rtx_remix_active = static_cast<float>(m_batch_ubo_data.u_rtx_remix_active);
+      d3d9_ubo.u_rtx_remix_padding[0] = static_cast<float>(m_batch_ubo_data.u_rtx_remix_padding[0]);
+      d3d9_ubo.u_rtx_remix_padding[1] = static_cast<float>(m_batch_ubo_data.u_rtx_remix_padding[1]);
+      d3d9_ubo.u_rtx_remix_padding[2] = static_cast<float>(m_batch_ubo_data.u_rtx_remix_padding[2]);
       g_gpu_device->UploadUniformBuffer(&d3d9_ubo, sizeof(d3d9_ubo));
     }
     else
@@ -4209,6 +4340,7 @@ void GPU_HW::FlushRender()
     m_batch_ubo_dirty = false;
   }
 
+  m_rtx_remix_batch_draw_rect = m_current_draw_rect;
   m_current_draw_rect = INVALID_RECT;
   m_current_uv_rect = INVALID_RECT;
 
@@ -4280,6 +4412,17 @@ void GPU_HW::UpdateDisplay(const GPUBackendUpdateDisplayCommand* cmd)
   const u32 interlaced_field = BoolToUInt32(cmd->interlaced_display_field);
   const u32 line_skip = BoolToUInt32(cmd->interlaced_display_interleaved);
   const u32 resolution_scale = cmd->display_24bit ? 1 : m_resolution_scale;
+  m_rtx_remix_display_rect =
+    cmd->display_disabled ? INVALID_RECT :
+                            GSVector4i(cmd->display_vram_left,
+                                       cmd->display_vram_top +
+                                         (BoolToUInt8(cmd->interlaced_display_field) &
+                                          BoolToUInt8(cmd->interlaced_display_interleaved)),
+                                       cmd->display_vram_left + cmd->display_vram_width,
+                                       cmd->display_vram_top +
+                                         (BoolToUInt8(cmd->interlaced_display_field) &
+                                          BoolToUInt8(cmd->interlaced_display_interleaved)) +
+                                         cmd->display_vram_height);
   const u32 scaled_vram_offset_x = cmd->display_vram_left * resolution_scale;
   const u32 scaled_vram_offset_y =
     cmd->display_vram_top * resolution_scale +
