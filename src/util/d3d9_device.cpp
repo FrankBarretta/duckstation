@@ -1426,6 +1426,12 @@ void D3D9Device::BeginRTXRemixShadowDraw()
   m_device->SetTransform(D3DTS_VIEW, &identity);
   m_device->SetTransform(D3DTS_PROJECTION, &perspective);
   m_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+  m_device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+  m_device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+  m_device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+  m_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+  m_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+  m_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0000000F);
 }
 
 void D3D9Device::EndRTXRemixShadowDraw()

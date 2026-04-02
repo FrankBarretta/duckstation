@@ -118,6 +118,37 @@ ALWAYS_INLINE_RELEASE static u32 GetBoxDownsampleScale(u32 resolution_scale)
   return scale;
 }
 
+ALWAYS_INLINE static u64 ComputeRTXRemixReplayHash(GPUTexture* texture, const void* vertex_data, size_t vertex_size)
+{
+  constexpr u64 offset_basis = 1469598103934665603ull;
+  constexpr u64 prime = 1099511628211ull;
+
+  u64 hash = offset_basis;
+  const uintptr_t texture_bits = reinterpret_cast<uintptr_t>(texture);
+  for (u32 shift = 0; shift < (sizeof(texture_bits) * 8); shift += 8)
+  {
+    hash ^= static_cast<u8>((texture_bits >> shift) & 0xFFu);
+    hash *= prime;
+  }
+
+  const u8* const bytes = static_cast<const u8*>(vertex_data);
+  for (size_t i = 0; i < vertex_size; i++)
+  {
+    hash ^= bytes[i];
+    hash *= prime;
+  }
+
+  return hash;
+}
+
+ALWAYS_INLINE static u64 ComputeRTXRemixReplayHash(bool use_texture, GPUTexture* texture, const void* vertex_data,
+                                                   size_t vertex_size)
+{
+  u64 hash = ComputeRTXRemixReplayHash(texture, vertex_data, vertex_size);
+  hash ^= use_texture ? 0x9E3779B97F4A7C15ull : 0xC2B2AE3D27D4EB4Full;
+  return hash;
+}
+
 ALWAYS_INLINE static bool ShouldDrawWithSoftwareRenderer()
 {
   return (g_gpu_settings.gpu_use_software_renderer_for_readbacks ||
@@ -1860,6 +1891,7 @@ bool GPU_HW::CompilePipelines(Error* error)
 bool GPU_HW::CompileRTXRemixPipelines(Error* error)
 {
   m_rtx_remix_textured_pipeline.reset();
+  m_rtx_remix_untextured_pipeline.reset();
 
   if (g_gpu_device->GetRenderAPI() != RenderAPI::D3D9)
     return true;
@@ -1884,7 +1916,17 @@ sampler2D samp0 : register(s0);
 
 float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
 {
-  return saturate(v_col0 * tex2D(samp0, v_tex0));
+  float4 tex = tex2D(samp0, v_tex0);
+  return float4(saturate(v_col0.rgb * tex.rgb), 1.0f);
+}
+  )";
+
+  static constexpr const char* replay_untextured_fs = R"(
+float4 u_dummy0 : register(c0);
+
+float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
+{
+  return float4(saturate(v_col0.rgb), 1.0f);
 }
   )";
 
@@ -1892,7 +1934,9 @@ float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
     g_gpu_device->CreateShader(GPUShaderStage::Vertex, GPUShaderLanguage::HLSL, replay_vs, error);
   std::unique_ptr<GPUShader> fs =
     g_gpu_device->CreateShader(GPUShaderStage::Fragment, GPUShaderLanguage::HLSL, replay_fs, error);
-  if (!vs || !fs)
+  std::unique_ptr<GPUShader> untextured_fs =
+    g_gpu_device->CreateShader(GPUShaderStage::Fragment, GPUShaderLanguage::HLSL, replay_untextured_fs, error);
+  if (!vs || !fs || !untextured_fs)
   {
     Error::AddPrefix(error, "Failed to compile RTX Remix replay shaders: ");
     return false;
@@ -1917,7 +1961,7 @@ float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
   plconfig.rasterization = GPUPipeline::RasterizationState::GetNoCullState();
   plconfig.primitive = GPUPipeline::Primitive::Triangles;
   plconfig.depth = GPUPipeline::DepthState::GetNoTestsState();
-  plconfig.blend = GPUPipeline::BlendState::GetAlphaBlendingState();
+  plconfig.blend = GPUPipeline::BlendState::GetNoBlendingState();
   plconfig.blend.write_mask = 0x7;
   plconfig.vertex_shader = vs.get();
   plconfig.geometry_shader = nullptr;
@@ -1930,6 +1974,14 @@ float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
   if (!m_rtx_remix_textured_pipeline)
   {
     Error::AddPrefix(error, "Failed to create RTX Remix textured replay pipeline: ");
+    return false;
+  }
+
+  plconfig.fragment_shader = untextured_fs.get();
+  m_rtx_remix_untextured_pipeline = g_gpu_device->CreatePipeline(plconfig, error);
+  if (!m_rtx_remix_untextured_pipeline)
+  {
+    Error::AddPrefix(error, "Failed to create RTX Remix untextured replay pipeline: ");
     return false;
   }
 
@@ -2300,76 +2352,23 @@ void GPU_HW::UnmapGPUBuffer(u32 used_vertices, u32 used_indices)
   m_batch_index_space = 0;
 }
 
-void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num_indices, u32 base_index,
-                                            u32 base_vertex, const GPUTextureCache::Source* texture)
+void GPU_HW::ReplayCachedRTXRemixDraw(const RTXRemixReplayDraw& draw)
 {
-  if (!m_rtx_remix_mode || m_wireframe_mode == GPUWireframeMode::OnlyWireframe)
+  if (!m_rtx_remix_mode || draw.vertices.empty() || (draw.use_texture && !draw.texture) ||
+      (draw.use_texture && !m_rtx_remix_textured_pipeline) || (!draw.use_texture && !m_rtx_remix_untextured_pipeline))
     return;
-
-  if (!m_rtx_remix_display_rect.eq(INVALID_RECT) && !m_rtx_remix_batch_draw_rect.eq(INVALID_RECT) &&
-      !m_rtx_remix_batch_draw_rect.rintersects(m_rtx_remix_display_rect))
-  {
-    return;
-  }
 
   GPUSwapChain* const swap_chain = g_gpu_device->GetMainSwapChain();
   if (!swap_chain)
     return;
 
-  const GPUTextureCache::Source* const replay_source = m_rtx_remix_source ? m_rtx_remix_source : texture;
-  GPUTexture* remix_texture = nullptr;
-  BatchTextureMode remix_texture_mode = m_batch.texture_mode;
-  if (m_use_texture_cache && m_batch.texture_mode != BatchTextureMode::Disabled)
-    remix_texture = replay_source ? replay_source->texture : m_vram_read_texture.get();
-
-  const bool has_decoded_texture =
-    (replay_source && replay_source->texture && !replay_source->texture->IsRenderTargetOrDepthStencil() &&
-     m_batch.texture_mode != BatchTextureMode::Disabled);
-  if (has_decoded_texture)
-  {
-    remix_texture = replay_source->texture;
-    remix_texture_mode = m_batch.sprite_mode ? BatchTextureMode::SpritePageTexture : BatchTextureMode::PageTexture;
-  }
-  else if (!remix_texture)
-  {
-    remix_texture = g_gpu_device->GetEmptyTexture();
-    remix_texture_mode = BatchTextureMode::Disabled;
-  }
-
-  const BatchRenderMode remix_render_mode =
-    (render_mode == BatchRenderMode::ShaderBlend) ? m_batch.GetRenderMode() : render_mode;
-  const u8 depth_test = BoolToUInt8(m_batch.use_depth_buffer);
-  const u8 check_mask = 0;
-  const u8 texture_mode =
-    (static_cast<u8>(remix_texture_mode) +
-     ((remix_texture_mode < BatchTextureMode::Disabled && m_batch.sprite_mode) ?
-        static_cast<u8>(BatchTextureMode::SpriteStart) :
-        0));
-
-  const bool use_textured_replay_pipeline =
-    has_decoded_texture && m_rtx_remix_textured_pipeline && !m_rtx_remix_vertices.empty();
-  g_gpu_device->SetPipeline(use_textured_replay_pipeline ? m_rtx_remix_textured_pipeline.get() :
-                                                          m_batch_pipelines[depth_test]
-                                                                           [static_cast<u8>(m_batch.transparency_mode)]
-                                                                           [static_cast<u8>(remix_render_mode)]
-                                                                           [texture_mode]
-                                                                           [BoolToUInt8(m_batch.dithering)]
-                                                                           [BoolToUInt8(m_batch.interlacing)]
-                                                                           [check_mask]
-                                                                             .get());
-  g_gpu_device->SetTextureSampler(0, remix_texture, g_gpu_device->GetNearestSampler());
-
   const BatchUBOData old_ubo = m_batch_ubo_data;
   BatchUBOData replay_ubo = old_ubo;
-  if (!m_rtx_remix_display_rect.eq(INVALID_RECT) && m_rtx_remix_display_rect.width() > 0 &&
-      m_rtx_remix_display_rect.height() > 0)
-  {
-    replay_ubo.u_rtx_remix_offset_x = static_cast<float>(m_rtx_remix_display_rect.left);
-    replay_ubo.u_rtx_remix_offset_y = static_cast<float>(m_rtx_remix_display_rect.top);
-    replay_ubo.u_rtx_remix_scale_x = 1024.0f / static_cast<float>(m_rtx_remix_display_rect.width());
-    replay_ubo.u_rtx_remix_scale_y = 512.0f / static_cast<float>(m_rtx_remix_display_rect.height());
-    replay_ubo.u_rtx_remix_active = 1;
-  }
+  replay_ubo.u_rtx_remix_offset_x = 0.0f;
+  replay_ubo.u_rtx_remix_offset_y = 0.0f;
+  replay_ubo.u_rtx_remix_scale_x = 1.0f;
+  replay_ubo.u_rtx_remix_scale_y = 1.0f;
+  replay_ubo.u_rtx_remix_active = 0;
 
   if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
   {
@@ -2423,22 +2422,19 @@ void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num
     g_gpu_device->UploadUniformBuffer(&replay_ubo, sizeof(replay_ubo));
   }
 
+  g_gpu_device->SetPipeline(draw.use_texture ? m_rtx_remix_textured_pipeline.get() : m_rtx_remix_untextured_pipeline.get());
+  g_gpu_device->SetTextureSampler(0, draw.use_texture ? draw.texture : g_gpu_device->GetEmptyTexture(),
+                                  g_gpu_device->GetNearestSampler());
   g_gpu_device->SetRenderTarget(nullptr, nullptr);
   g_gpu_device->SetViewportAndScissor(0, 0, static_cast<s32>(swap_chain->GetWidth()),
                                       static_cast<s32>(swap_chain->GetHeight()));
 
+  u32 replay_base_vertex;
+  g_gpu_device->UploadVertexBuffer(draw.vertices.data(), sizeof(RTXRemixVertex),
+                                   static_cast<u32>(draw.vertices.size()), &replay_base_vertex);
+
   g_gpu_device->BeginRTXRemixShadowDraw();
-  if (use_textured_replay_pipeline)
-  {
-    u32 replay_base_vertex;
-    g_gpu_device->UploadVertexBuffer(m_rtx_remix_vertices.data(), sizeof(RTXRemixVertex),
-                                     static_cast<u32>(m_rtx_remix_vertices.size()), &replay_base_vertex);
-    g_gpu_device->Draw(static_cast<u32>(m_rtx_remix_vertices.size()), replay_base_vertex);
-  }
-  else
-  {
-    g_gpu_device->DrawIndexed(num_indices, base_index, base_vertex);
-  }
+  g_gpu_device->Draw(static_cast<u32>(draw.vertices.size()), replay_base_vertex);
   g_gpu_device->EndRTXRemixShadowDraw();
 
   if (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9)
@@ -2488,15 +2484,67 @@ void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num
     g_gpu_device->UploadUniformBuffer(&old_ubo, sizeof(old_ubo));
   }
 
-  if (m_use_texture_cache && m_batch.texture_mode != BatchTextureMode::Disabled)
-  {
-    g_gpu_device->SetTextureSampler(0, texture ? texture->texture : m_vram_read_texture.get(),
-                                    g_gpu_device->GetNearestSampler());
-  }
-
   SetVRAMRenderTarget();
   g_gpu_device->SetViewport(m_vram_texture->GetRect());
   SetScissor();
+}
+
+void GPU_HW::ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num_indices, u32 base_index,
+                                            u32 base_vertex, const GPUTextureCache::Source* texture)
+{
+  if (!m_rtx_remix_mode || m_wireframe_mode == GPUWireframeMode::OnlyWireframe)
+    return;
+
+  if (render_mode == BatchRenderMode::OnlyTransparent)
+    return;
+
+  GPUSwapChain* const swap_chain = g_gpu_device->GetMainSwapChain();
+  if (!swap_chain)
+    return;
+
+  const GPUTextureCache::Source* const replay_source = m_rtx_remix_source ? m_rtx_remix_source : texture;
+  GPUTexture* remix_texture = nullptr;
+  BatchTextureMode remix_texture_mode = m_batch.texture_mode;
+  if (m_use_texture_cache && m_batch.texture_mode != BatchTextureMode::Disabled)
+    remix_texture = replay_source ? replay_source->texture : m_vram_read_texture.get();
+
+  const bool has_decoded_texture =
+    (replay_source && replay_source->texture && !replay_source->texture->IsRenderTargetOrDepthStencil() &&
+     m_batch.texture_mode != BatchTextureMode::Disabled);
+  if (has_decoded_texture)
+  {
+    remix_texture = replay_source->texture;
+    remix_texture_mode = m_batch.sprite_mode ? BatchTextureMode::SpritePageTexture : BatchTextureMode::PageTexture;
+  }
+  else if (!remix_texture)
+  {
+    remix_texture = g_gpu_device->GetEmptyTexture();
+    remix_texture_mode = BatchTextureMode::Disabled;
+  }
+
+  const BatchRenderMode remix_render_mode =
+    (render_mode == BatchRenderMode::ShaderBlend) ? m_batch.GetRenderMode() : render_mode;
+  const u8 depth_test = BoolToUInt8(m_batch.use_depth_buffer);
+  const u8 check_mask = 0;
+  const u8 texture_mode =
+    (static_cast<u8>(remix_texture_mode) +
+     ((remix_texture_mode < BatchTextureMode::Disabled && m_batch.sprite_mode) ?
+        static_cast<u8>(BatchTextureMode::SpriteStart) :
+        0));
+
+  const bool queue_replay_draw = !m_rtx_remix_vertices.empty();
+  if (queue_replay_draw)
+  {
+    RTXRemixReplayDraw& queued_draw = m_rtx_remix_frame_draws.emplace_back();
+    queued_draw.last_seen_frame = System::GetFrameNumber();
+    queued_draw.use_texture = has_decoded_texture;
+    queued_draw.texture = remix_texture;
+    queued_draw.vertices = m_rtx_remix_vertices;
+    queued_draw.hash =
+      ComputeRTXRemixReplayHash(queued_draw.use_texture, queued_draw.texture, queued_draw.vertices.data(),
+                                queued_draw.vertices.size() * sizeof(RTXRemixVertex));
+    return;
+  }
 }
 
 ALWAYS_INLINE_RELEASE void GPU_HW::DrawBatchVertices(BatchRenderMode render_mode, u32 num_indices, u32 base_index,
@@ -2554,8 +2602,6 @@ ALWAYS_INLINE_RELEASE void GPU_HW::DrawBatchVertices(BatchRenderMode render_mode
   {
     g_gpu_device->DrawIndexed(num_indices, base_index, base_vertex);
   }
-
-  ReplayBatchVerticesForRTXRemix(render_mode, num_indices, base_index, base_vertex, texture);
 }
 
 ALWAYS_INLINE_RELEASE void GPU_HW::ComputeUVPartialDerivatives(const BatchVertex* vertices, float* dudx, float* dudy,
@@ -4395,11 +4441,11 @@ void GPU_HW::FlushRender()
                      GPUTextureCache::PaletteRecordFlags::None);
   }
 
-  if (m_rtx_remix_mode && m_rtx_remix_source && m_rtx_remix_source->texture &&
-      !m_rtx_remix_source->texture->IsRenderTargetOrDepthStencil() && !m_rtx_remix_batch_indices.empty() &&
-      !m_rtx_remix_batch_vertices.empty())
+  if (m_rtx_remix_mode && !m_rtx_remix_batch_indices.empty() && !m_rtx_remix_batch_vertices.empty())
   {
-    const GSVector4i texture_rect = m_rtx_remix_source->texture_rect;
+    const bool has_decoded_texture =
+      (m_rtx_remix_source && m_rtx_remix_source->texture && !m_rtx_remix_source->texture->IsRenderTargetOrDepthStencil());
+    const GSVector4i texture_rect = has_decoded_texture ? m_rtx_remix_source->texture_rect : GSVector4i::zero();
     const float texture_width = static_cast<float>(std::max<s32>(texture_rect.width(), 1));
     const float texture_height = static_cast<float>(std::max<s32>(texture_rect.height(), 1));
     const bool remap_display =
@@ -4423,16 +4469,24 @@ void GPU_HW::FlushRender()
       dst.z = src.z;
       dst.w = src.w;
       dst.color = src.color;
-      dst.u = (static_cast<float>(src.u) - static_cast<float>(texture_rect.left)) / texture_width;
-      dst.v = (static_cast<float>(src.v) - static_cast<float>(texture_rect.top)) / texture_height;
-      if (dst.u < 0.0f)
+      if (has_decoded_texture)
+      {
+        dst.u = (static_cast<float>(src.u) - static_cast<float>(texture_rect.left)) / texture_width;
+        dst.v = (static_cast<float>(src.v) - static_cast<float>(texture_rect.top)) / texture_height;
+        if (dst.u < 0.0f)
+          dst.u = 0.0f;
+        else if (dst.u > 1.0f)
+          dst.u = 1.0f;
+        if (dst.v < 0.0f)
+          dst.v = 0.0f;
+        else if (dst.v > 1.0f)
+          dst.v = 1.0f;
+      }
+      else
+      {
         dst.u = 0.0f;
-      else if (dst.u > 1.0f)
-        dst.u = 1.0f;
-      if (dst.v < 0.0f)
         dst.v = 0.0f;
-      else if (dst.v > 1.0f)
-        dst.v = 1.0f;
+      }
       m_rtx_remix_vertices.push_back(dst);
     }
   }
@@ -4512,6 +4566,8 @@ void GPU_HW::FlushRender()
     {
       DrawBatchVertices(m_batch.GetRenderMode(), index_count, base_index, base_vertex, texture);
     }
+
+    ReplayBatchVerticesForRTXRemix(m_batch.GetRenderMode(), index_count, base_index, base_vertex, texture);
   }
 
   if (m_wireframe_mode != GPUWireframeMode::Disabled)
@@ -4567,14 +4623,42 @@ void GPU_HW::UpdateDisplay(const GPUBackendUpdateDisplayCommand* cmd)
   m_rtx_remix_display_rect =
     cmd->display_disabled ? INVALID_RECT :
                             GSVector4i(cmd->display_vram_left,
-                                       cmd->display_vram_top +
-                                         (BoolToUInt8(cmd->interlaced_display_field) &
-                                          BoolToUInt8(cmd->interlaced_display_interleaved)),
+                                       cmd->display_vram_top,
                                        cmd->display_vram_left + cmd->display_vram_width,
-                                       cmd->display_vram_top +
-                                         (BoolToUInt8(cmd->interlaced_display_field) &
-                                          BoolToUInt8(cmd->interlaced_display_interleaved)) +
-                                         cmd->display_vram_height);
+                                       cmd->display_vram_top + cmd->display_vram_height);
+  if (m_rtx_remix_mode && !cmd->display_disabled)
+  {
+    const u32 current_frame = System::GetFrameNumber();
+    for (const RTXRemixReplayDraw& draw : m_rtx_remix_frame_draws)
+    {
+      auto it = std::find_if(m_rtx_remix_previous_frame_draws.begin(), m_rtx_remix_previous_frame_draws.end(),
+                             [&draw](const RTXRemixReplayDraw& existing) { return existing.hash == draw.hash; });
+      if (it != m_rtx_remix_previous_frame_draws.end())
+      {
+        it->texture = draw.texture;
+        it->vertices = draw.vertices;
+        it->last_seen_frame = current_frame;
+      }
+      else
+      {
+        m_rtx_remix_previous_frame_draws.push_back(draw);
+      }
+    }
+
+    for (auto it = m_rtx_remix_previous_frame_draws.begin(); it != m_rtx_remix_previous_frame_draws.end();)
+    {
+      if ((current_frame - it->last_seen_frame) > 2)
+      {
+        it = m_rtx_remix_previous_frame_draws.erase(it);
+        continue;
+      }
+
+      ReplayCachedRTXRemixDraw(*it);
+      ++it;
+    }
+
+    m_rtx_remix_frame_draws.clear();
+  }
   const u32 scaled_vram_offset_x = cmd->display_vram_left * resolution_scale;
   const u32 scaled_vram_offset_y =
     cmd->display_vram_top * resolution_scale +
@@ -4738,6 +4822,15 @@ void GPU_HW::UpdateDisplay(const GPUBackendUpdateDisplayCommand* cmd)
 
   if (drew_anything)
     RestoreDeviceContext();
+
+  if (m_rtx_remix_mode)
+  {
+    if (cmd->display_disabled)
+    {
+      m_rtx_remix_previous_frame_draws.clear();
+      m_rtx_remix_frame_draws.clear();
+    }
+  }
 }
 
 void GPU_HW::UpdateDownsamplingLevels()

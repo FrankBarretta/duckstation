@@ -147,6 +147,15 @@ private:
     float v;
   };
 
+  struct RTXRemixReplayDraw
+  {
+    u64 hash = 0;
+    u32 last_seen_frame = 0;
+    bool use_texture = false;
+    GPUTexture* texture = nullptr;
+    std::vector<RTXRemixVertex> vertices;
+  };
+
   struct BatchConfig
   {
     BatchTextureMode texture_mode;
@@ -212,6 +221,7 @@ private:
   void DeactivateROV();
   void MapGPUBuffer(u32 required_vertices, u32 required_indices);
   void UnmapGPUBuffer(u32 used_vertices, u32 used_indices);
+  void ReplayCachedRTXRemixDraw(const RTXRemixReplayDraw& draw);
   void ReplayBatchVerticesForRTXRemix(BatchRenderMode render_mode, u32 num_indices, u32 base_index, u32 base_vertex,
                                       const GPUTextureCache::Source* texture);
   void DrawBatchVertices(BatchRenderMode render_mode, u32 num_indices, u32 base_index, u32 base_vertex,
@@ -356,6 +366,8 @@ private:
   std::vector<BatchVertex> m_rtx_remix_batch_vertices;
   std::vector<GPUDevice::DrawIndex> m_rtx_remix_batch_indices;
   std::vector<RTXRemixVertex> m_rtx_remix_vertices;
+  std::vector<RTXRemixReplayDraw> m_rtx_remix_frame_draws;
+  std::vector<RTXRemixReplayDraw> m_rtx_remix_previous_frame_draws;
 
   // Bounding box of VRAM area that the GPU has drawn into.
   GSVector4i m_vram_dirty_draw_rect = INVALID_RECT;
@@ -409,6 +421,7 @@ private:
   // [depth_test][transparency_mode][render_mode][texture_mode][dithering][interlacing][check_mask]
   DimensionalArray<std::unique_ptr<GPUPipeline>, 2, 2, 2, NUM_TEXTURE_MODES, 5, 5, 2> m_batch_pipelines{};
   std::unique_ptr<GPUPipeline> m_rtx_remix_textured_pipeline;
+  std::unique_ptr<GPUPipeline> m_rtx_remix_untextured_pipeline;
 
   // common shaders
   std::unique_ptr<GPUShader> m_fullscreen_quad_vertex_shader;
