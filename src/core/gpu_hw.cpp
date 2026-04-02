@@ -499,6 +499,7 @@ void GPU_HW::DoMemoryState(StateWrapper& sw, System::MemorySaveState& mss)
     SetFullVRAMDirtyRectangle();
     UpdateVRAMReadTexture(true, false);
     ClearVRAMDirtyRectangle();
+    m_batch_ubo_dirty = true;
   }
   else
   {

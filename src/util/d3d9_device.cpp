@@ -1291,7 +1291,7 @@ void D3D9Device::DrawIndexed(u32 index_count, u32 base_index, u32 base_vertex)
   const UINT primitive_count = (m_current_pipeline->GetPrimitive() == D3DPT_TRIANGLESTRIP) ? (index_count - 2) :
                                (m_current_pipeline->GetPrimitive() == D3DPT_TRIANGLELIST) ? (index_count / 3) :
                                (m_current_pipeline->GetPrimitive() == D3DPT_LINELIST) ? (index_count / 2) : index_count;
-  const u32 total_vertices = m_current_pipeline->UsesInternalScreenQuad() ? 4u :
+  const u32 total_vertices = m_current_pipeline->UsesInternalScreenQuad() ? 3u :
                               (m_current_pipeline->GetVertexStride() > 0 ?
                                  (m_vertex_buffer_position / m_current_pipeline->GetVertexStride()) :
                                  0u);
@@ -1315,7 +1315,7 @@ void D3D9Device::DrawIndexedWithPushConstants(u32 index_count, u32 base_index, u
   const UINT primitive_count = (m_current_pipeline->GetPrimitive() == D3DPT_TRIANGLESTRIP) ? (index_count - 2) :
                                (m_current_pipeline->GetPrimitive() == D3DPT_TRIANGLELIST) ? (index_count / 3) :
                                (m_current_pipeline->GetPrimitive() == D3DPT_LINELIST) ? (index_count / 2) : index_count;
-  const u32 total_vertices = m_current_pipeline->UsesInternalScreenQuad() ? 4u :
+  const u32 total_vertices = m_current_pipeline->UsesInternalScreenQuad() ? 3u :
                               (m_current_pipeline->GetVertexStride() > 0 ?
                                  (m_vertex_buffer_position / m_current_pipeline->GetVertexStride()) :
                                  0u);
@@ -1448,7 +1448,10 @@ bool D3D9Device::CreateDeviceAndMainSwapChain(std::string_view adapter, CreateFl
     return false;
   }
 
-  hr = m_device->CreateVertexBuffer(sizeof(D3D9ScreenQuadVertex) * 4, 0, 0, D3DPOOL_MANAGED,
+  // Use an oversized triangle (3 vertices) that covers the full viewport when rendered as a triangle list.
+  // This matches what other APIs do with SV_VertexID-generated vertices in the fullscreen quad vertex shader.
+  // The viewport/scissor clips the triangle to the visible area, and UVs interpolate correctly.
+  hr = m_device->CreateVertexBuffer(sizeof(D3D9ScreenQuadVertex) * 3, 0, 0, D3DPOOL_MANAGED,
                                     m_screen_quad_vertex_buffer.ReleaseAndGetAddressOf(), nullptr);
   if (FAILED(hr))
   {
@@ -1458,11 +1461,10 @@ bool D3D9Device::CreateDeviceAndMainSwapChain(std::string_view adapter, CreateFl
 
   if (void* quad_vertices; SUCCEEDED(m_screen_quad_vertex_buffer->Lock(0, 0, &quad_vertices, 0)))
   {
-    static constexpr std::array<D3D9ScreenQuadVertex, 4> verts = {{
+    static constexpr std::array<D3D9ScreenQuadVertex, 3> verts = {{
       {-1.0f, 1.0f, 0.0f, 0.0f},
-      {1.0f, 1.0f, 1.0f, 0.0f},
-      {-1.0f, -1.0f, 0.0f, 1.0f},
-      {1.0f, -1.0f, 1.0f, 1.0f},
+      {3.0f, 1.0f, 2.0f, 0.0f},
+      {-1.0f, -3.0f, 0.0f, 2.0f},
     }};
     std::memcpy(quad_vertices, verts.data(), sizeof(verts));
     m_screen_quad_vertex_buffer->Unlock();
