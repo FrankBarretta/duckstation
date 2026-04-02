@@ -2235,7 +2235,7 @@ std::string GPU_HW_ShaderGen::GenerateVRAMWriteFragmentShader(bool use_buffer, b
 
 #if !USE_BUFFER
 #if API_D3D9
-  int value = int(LOAD_TEXTURE(samp0, int2(offset), 0).x);
+  int value = int(roundEven(saturate(LOAD_TEXTURE(samp0, int2(offset), 0).x) * 65535.0));
 #else
   uint value = LOAD_TEXTURE(samp0, int2(offset), 0).x;
 #endif

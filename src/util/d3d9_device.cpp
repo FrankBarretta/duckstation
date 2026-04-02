@@ -63,6 +63,10 @@ static std::optional<D3DFORMAT> GetD3D9Format(GPUTextureFormat format)
     case GPUTextureFormat::R8:
       return D3DFMT_L8;
 
+    case GPUTextureFormat::R16:
+    case GPUTextureFormat::R16U:
+      return D3DFMT_L16;
+
     case GPUTextureFormat::D16:
       return D3DFMT_D16;
 
@@ -71,6 +75,36 @@ static std::optional<D3DFORMAT> GetD3D9Format(GPUTextureFormat format)
 
     default:
       return std::nullopt;
+  }
+}
+
+static GPUTextureFormat GetGPUTextureFormat(D3DFORMAT format)
+{
+  switch (format)
+  {
+    case D3DFMT_A8R8G8B8:
+      return GPUTextureFormat::BGRA8;
+
+    case D3DFMT_R5G6B5:
+      return GPUTextureFormat::RGB565;
+
+    case D3DFMT_A1R5G5B5:
+      return GPUTextureFormat::RGB5A1;
+
+    case D3DFMT_L8:
+      return GPUTextureFormat::R8;
+
+    case D3DFMT_L16:
+      return GPUTextureFormat::R16;
+
+    case D3DFMT_D16:
+      return GPUTextureFormat::D16;
+
+    case D3DFMT_D24S8:
+      return GPUTextureFormat::D24S8;
+
+    default:
+      return GPUTextureFormat::Unknown;
   }
 }
 
@@ -676,7 +710,160 @@ void D3D9Device::CopyTextureRegion(GPUTexture* dst, u32 dst_x, u32 dst_y, u32 ds
                                    GPUTexture* src, u32 src_x, u32 src_y, u32 src_layer, u32 src_level, u32 width,
                                    u32 height)
 {
-  ERROR_LOG("D3D9Device::CopyTextureRegion() not implemented.");
+  if (!m_device)
+    return;
+
+  D3D9Texture* const dst9 = static_cast<D3D9Texture*>(dst);
+  D3D9Texture* const src9 = static_cast<D3D9Texture*>(src);
+  if (!dst9 || !src9 || dst_layer != 0 || dst_level != 0 || src_layer != 0 || src_level != 0 ||
+      dst9->GetFormat() != src9->GetFormat())
+  {
+    ERROR_LOG("D3D9Device::CopyTextureRegion() received unsupported parameters.");
+    return;
+  }
+
+  const RECT src_rect = {static_cast<LONG>(src_x), static_cast<LONG>(src_y), static_cast<LONG>(src_x + width),
+                         static_cast<LONG>(src_y + height)};
+  const RECT dst_rect = {static_cast<LONG>(dst_x), static_cast<LONG>(dst_y), static_cast<LONG>(dst_x + width),
+                         static_cast<LONG>(dst_y + height)};
+  const u32 row_size = width * GPUTexture::GetPixelSize(src9->GetFormat());
+
+  const std::optional<D3DFORMAT> d3d_format = GetD3D9Format(src9->GetFormat());
+  if (!d3d_format.has_value())
+  {
+    ERROR_LOG("D3D9Device::CopyTextureRegion() unsupported format {}.", GPUTexture::GetFormatName(src9->GetFormat()));
+    return;
+  }
+
+  GPUDevice::GetStatistics().num_copies++;
+
+  ComPtr<IDirect3DSurface9> temp_sys;
+  HRESULT hr = m_device->CreateOffscreenPlainSurface(width, height, d3d_format.value(), D3DPOOL_SYSTEMMEM,
+                                                     temp_sys.GetAddressOf(), nullptr);
+  if (FAILED(hr))
+  {
+    ERROR_LOG("D3D9Device::CopyTextureRegion() CreateOffscreenPlainSurface failed: {:08X}", static_cast<u32>(hr));
+    return;
+  }
+
+  if (src9->IsDepthStencil() || dst9->IsDepthStencil())
+  {
+    ERROR_LOG("D3D9Device::CopyTextureRegion() depth-stencil copies are not supported.");
+    return;
+  }
+
+  if (src9->IsRenderTarget())
+  {
+    ComPtr<IDirect3DSurface9> copy_source = src9->GetD3DSurface();
+    ComPtr<IDirect3DSurface9> temp_rt;
+    const bool needs_intermediate_rt =
+      (src_x != 0 || src_y != 0 || width != src9->GetWidth() || height != src9->GetHeight());
+    if (needs_intermediate_rt)
+    {
+      hr = m_device->CreateRenderTarget(width, height, d3d_format.value(), D3DMULTISAMPLE_NONE, 0, FALSE,
+                                        temp_rt.GetAddressOf(), nullptr);
+      if (FAILED(hr))
+      {
+        ERROR_LOG("D3D9Device::CopyTextureRegion() CreateRenderTarget failed: {:08X}", static_cast<u32>(hr));
+        return;
+      }
+
+      hr = m_device->StretchRect(src9->GetD3DSurface(), &src_rect, temp_rt.Get(), nullptr, D3DTEXF_NONE);
+      if (FAILED(hr))
+      {
+        ERROR_LOG("D3D9Device::CopyTextureRegion() StretchRect failed: {:08X}", static_cast<u32>(hr));
+        return;
+      }
+
+      copy_source = temp_rt;
+    }
+
+    hr = m_device->GetRenderTargetData(copy_source.Get(), temp_sys.Get());
+    if (FAILED(hr))
+    {
+      ERROR_LOG("D3D9Device::CopyTextureRegion() GetRenderTargetData failed: {:08X}", static_cast<u32>(hr));
+      return;
+    }
+  }
+  else
+  {
+    IDirect3DTexture9* const src_tex = static_cast<IDirect3DTexture9*>(src9->GetD3DTexture());
+    if (!src_tex)
+    {
+      ERROR_LOG("D3D9Device::CopyTextureRegion() missing source texture handle.");
+      return;
+    }
+
+    D3DLOCKED_RECT src_lock = {};
+    D3DLOCKED_RECT temp_lock = {};
+    hr = src_tex->LockRect(0, &src_lock, &src_rect, D3DLOCK_READONLY);
+    if (FAILED(hr))
+    {
+      ERROR_LOG("D3D9Device::CopyTextureRegion() src LockRect failed: {:08X}", static_cast<u32>(hr));
+      return;
+    }
+
+    hr = temp_sys->LockRect(&temp_lock, nullptr, 0);
+    if (FAILED(hr))
+    {
+      src_tex->UnlockRect(0);
+      ERROR_LOG("D3D9Device::CopyTextureRegion() temp LockRect failed: {:08X}", static_cast<u32>(hr));
+      return;
+    }
+
+    for (u32 row = 0; row < height; row++)
+    {
+      const u8* src_ptr = static_cast<const u8*>(src_lock.pBits) + (row * static_cast<u32>(src_lock.Pitch));
+      u8* dst_ptr = static_cast<u8*>(temp_lock.pBits) + (row * static_cast<u32>(temp_lock.Pitch));
+      std::memcpy(dst_ptr, src_ptr, row_size);
+    }
+
+    temp_sys->UnlockRect();
+    src_tex->UnlockRect(0);
+  }
+
+  if (dst9->IsRenderTarget())
+  {
+    const POINT dst_point = {static_cast<LONG>(dst_x), static_cast<LONG>(dst_y)};
+    hr = m_device->UpdateSurface(temp_sys.Get(), nullptr, dst9->GetD3DSurface(), &dst_point);
+    if (FAILED(hr))
+      ERROR_LOG("D3D9Device::CopyTextureRegion() UpdateSurface failed: {:08X}", static_cast<u32>(hr));
+    return;
+  }
+
+  IDirect3DTexture9* const dst_tex = static_cast<IDirect3DTexture9*>(dst9->GetD3DTexture());
+  if (!dst_tex)
+  {
+    ERROR_LOG("D3D9Device::CopyTextureRegion() missing destination texture handle.");
+    return;
+  }
+
+  D3DLOCKED_RECT temp_lock = {};
+  D3DLOCKED_RECT dst_lock = {};
+  hr = temp_sys->LockRect(&temp_lock, nullptr, D3DLOCK_READONLY);
+  if (FAILED(hr))
+  {
+    ERROR_LOG("D3D9Device::CopyTextureRegion() temp read LockRect failed: {:08X}", static_cast<u32>(hr));
+    return;
+  }
+
+  hr = dst_tex->LockRect(0, &dst_lock, &dst_rect, 0);
+  if (FAILED(hr))
+  {
+    temp_sys->UnlockRect();
+    ERROR_LOG("D3D9Device::CopyTextureRegion() dst LockRect failed: {:08X}", static_cast<u32>(hr));
+    return;
+  }
+
+  for (u32 row = 0; row < height; row++)
+  {
+    const u8* src_ptr = static_cast<const u8*>(temp_lock.pBits) + (row * static_cast<u32>(temp_lock.Pitch));
+    u8* dst_ptr = static_cast<u8*>(dst_lock.pBits) + (row * static_cast<u32>(dst_lock.Pitch));
+    std::memcpy(dst_ptr, src_ptr, row_size);
+  }
+
+  dst_tex->UnlockRect(0);
+  temp_sys->UnlockRect();
 }
 
 void D3D9Device::ResolveTextureRegion(GPUTexture* dst, u32 dst_x, u32 dst_y, u32 dst_layer, u32 dst_level,
@@ -1144,6 +1331,7 @@ bool D3D9Device::SupportsTextureFormat(GPUTextureFormat format) const
     case GPUTextureFormat::RGB565:
     case GPUTextureFormat::RGB5A1:
     case GPUTextureFormat::R8:
+    case GPUTextureFormat::R16U:
     case GPUTextureFormat::D16:
     case GPUTextureFormat::D24S8:
       return true;
@@ -1205,6 +1393,14 @@ bool D3D9Device::CreateDeviceAndMainSwapChain(std::string_view adapter, CreateFl
     return false;
   }
 
+  D3DSURFACE_DESC backbuffer_desc = {};
+  hr = m_backbuffer->GetDesc(&backbuffer_desc);
+  if (FAILED(hr))
+  {
+    Error::SetHResult(error, "IDirect3DSurface9::GetDesc() failed: ", hr);
+    return false;
+  }
+
   hr = m_device->CreateVertexBuffer(sizeof(D3D9ScreenQuadVertex) * 4, 0, 0, D3DPOOL_MANAGED,
                                     m_screen_quad_vertex_buffer.ReleaseAndGetAddressOf(), nullptr);
   if (FAILED(hr))
@@ -1225,7 +1421,21 @@ bool D3D9Device::CreateDeviceAndMainSwapChain(std::string_view adapter, CreateFl
     m_screen_quad_vertex_buffer->Unlock();
   }
 
-  m_main_swap_chain = std::make_unique<D3D9SwapChain>(wi, vsync_mode);
+  WindowInfo swap_chain_wi(wi);
+  swap_chain_wi.surface_width = static_cast<u16>(backbuffer_desc.Width);
+  swap_chain_wi.surface_height = static_cast<u16>(backbuffer_desc.Height);
+  swap_chain_wi.surface_format = GetGPUTextureFormat(backbuffer_desc.Format);
+  if (swap_chain_wi.surface_format == GPUTextureFormat::Unknown)
+  {
+    WARNING_LOG("Unknown D3D9 backbuffer format {}, falling back to BGRA8 for swap-chain metadata.",
+                static_cast<u32>(backbuffer_desc.Format));
+    swap_chain_wi.surface_format = GPUTextureFormat::BGRA8;
+  }
+
+  VERBOSE_LOG("D3D9 swap chain buffer size: {}x{}, format {}", swap_chain_wi.surface_width,
+              swap_chain_wi.surface_height, GPUTexture::GetFormatName(swap_chain_wi.surface_format));
+
+  m_main_swap_chain = std::make_unique<D3D9SwapChain>(swap_chain_wi, vsync_mode);
   return true;
 }
 

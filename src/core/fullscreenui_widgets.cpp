@@ -1058,6 +1058,11 @@ GPUTexture* FullscreenUI::GetBlurRenderTexture()
   if (!swap_chain)
     return nullptr;
 
+  const GPUTextureFormat blur_format =
+    (swap_chain->GetFormat() != GPUTextureFormat::Unknown) ? swap_chain->GetFormat() : GPUTextureFormat::RGBA8;
+  if (swap_chain->GetFormat() == GPUTextureFormat::Unknown)
+    WARNING_LOG("Swap chain format is unknown, using RGBA8 for blur render targets.");
+
   const u32 swap_chain_width = swap_chain->GetPostRotatedWidth();
   const u32 swap_chain_height = swap_chain->GetPostRotatedHeight();
   u32 blur_width, blur_height;
@@ -1077,13 +1082,13 @@ GPUTexture* FullscreenUI::GetBlurRenderTexture()
       s_state.blur_source_texture->GetHeight() != swap_chain_height)
   {
     if (!g_gpu_device->ResizeTexture(&s_state.blur_source_texture, swap_chain_width, swap_chain_height,
-                                     GPUTexture::Type::RenderTarget, swap_chain->GetFormat(), GPUTexture::Flags::None,
+                                     GPUTexture::Type::RenderTarget, blur_format, GPUTexture::Flags::None,
                                      false) ||
         !g_gpu_device->ResizeTexture(&s_state.blur_intermediate_texture, blur_width, blur_height,
-                                     GPUTexture::Type::RenderTarget, swap_chain->GetFormat(), GPUTexture::Flags::None,
+                                     GPUTexture::Type::RenderTarget, blur_format, GPUTexture::Flags::None,
                                      false) ||
         !g_gpu_device->ResizeTexture(&s_state.blur_output_texture, blur_width, blur_height,
-                                     GPUTexture::Type::RenderTarget, swap_chain->GetFormat(), GPUTexture::Flags::None,
+                                     GPUTexture::Type::RenderTarget, blur_format, GPUTexture::Flags::None,
                                      false))
     {
       ERROR_LOG("Failed to allocate {}x{}/{}x{} blur source texture.", swap_chain_width, swap_chain_height, blur_width,
