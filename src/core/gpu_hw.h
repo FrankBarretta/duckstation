@@ -14,6 +14,7 @@
 #include <limits>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace PostProcessing {
 class Chain;
@@ -135,6 +136,17 @@ private:
     void SetUVLimits(u32 min_u, u32 max_u, u32 min_v, u32 max_v);
   };
 
+  struct alignas(16) RTXRemixVertex
+  {
+    float x;
+    float y;
+    float z;
+    float w;
+    u32 color;
+    float u;
+    float v;
+  };
+
   struct BatchConfig
   {
     BatchTextureMode texture_mode;
@@ -184,6 +196,7 @@ private:
 
   bool CompileCommonShaders(Error* error);
   bool CompilePipelines(Error* error);
+  bool CompileRTXRemixPipelines(Error* error);
   bool CompileResolutionDependentPipelines(Error* error);
   bool CompileDownsamplePipelines(Error* error);
 
@@ -340,6 +353,9 @@ private:
   const GPUTextureCache::Source* m_rtx_remix_source = nullptr;
   GSVector4i m_rtx_remix_display_rect = INVALID_RECT;
   GSVector4i m_rtx_remix_batch_draw_rect = INVALID_RECT;
+  std::vector<BatchVertex> m_rtx_remix_batch_vertices;
+  std::vector<GPUDevice::DrawIndex> m_rtx_remix_batch_indices;
+  std::vector<RTXRemixVertex> m_rtx_remix_vertices;
 
   // Bounding box of VRAM area that the GPU has drawn into.
   GSVector4i m_vram_dirty_draw_rect = INVALID_RECT;
@@ -392,6 +408,7 @@ private:
 
   // [depth_test][transparency_mode][render_mode][texture_mode][dithering][interlacing][check_mask]
   DimensionalArray<std::unique_ptr<GPUPipeline>, 2, 2, 2, NUM_TEXTURE_MODES, 5, 5, 2> m_batch_pipelines{};
+  std::unique_ptr<GPUPipeline> m_rtx_remix_textured_pipeline;
 
   // common shaders
   std::unique_ptr<GPUShader> m_fullscreen_quad_vertex_shader;
