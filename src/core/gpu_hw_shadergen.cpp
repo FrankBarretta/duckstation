@@ -20,6 +20,26 @@ GPU_HW_ShaderGen::~GPU_HW_ShaderGen() = default;
 void GPU_HW_ShaderGen::WriteColorConversionFunctions(std::stringstream& ss) const
 {
   ss << R"(
+#if API_D3D9
+int RGBA8ToRGBA5551(float4 v)
+{
+  int r = int(roundEven(saturate(v.r) * 31.0));
+  int g = int(roundEven(saturate(v.g) * 31.0));
+  int b = int(roundEven(saturate(v.b) * 31.0));
+  int a = (v.a != 0.0) ? 1 : 0;
+  return r + (g * 32) + (b * 1024) + (a * 32768);
+}
+
+float4 RGBA5551ToRGBA8(int v)
+{
+  int r = v % 32;
+  int g = (v / 32) % 32;
+  int b = (v / 1024) % 32;
+  int a = (v / 32768) % 2;
+
+  return float4(float(r) / 31.0, float(g) / 31.0, float(b) / 31.0, float(a));
+}
+#else
 uint RGBA8ToRGBA5551(float4 v)
 {
   uint r = uint(roundEven(v.r * 31.0));
@@ -38,6 +58,7 @@ float4 RGBA5551ToRGBA8(uint v)
 
   return float4(float(r) / 31.0, float(g) / 31.0, float(b) / 31.0, float(a));
 }
+#endif
 )";
 }
 
@@ -89,18 +110,31 @@ std::string GPU_HW_ShaderGen::GenerateBatchVertexShader(bool upscaled, bool msaa
 
   WriteBatchUniformBuffer(ss);
 
+  const bool d3d9 = (m_render_api == RenderAPI::D3D9);
+
   if (textured && page_texture)
   {
     if (uv_limits)
     {
       DeclareVertexEntryPoint(
-        ss, {"float4 a_pos", "float4 a_col0", "uint a_texcoord", "uint a_texpage", "float4 a_uv_limits"}, 1, 1,
-        {{"nointerpolation", "float4 v_uv_limits"}}, false, "", msaa, per_sample_shading, disable_color_perspective);
+        ss,
+        d3d9 ? std::initializer_list<const char*>{"float4 a_pos", "float4 a_col0", "float2 a_texcoord",
+                                                  "float2 a_texpage", "float4 a_uv_limits"} :
+                std::initializer_list<const char*>{"float4 a_pos", "float4 a_col0", "uint a_texcoord",
+                                                  "uint a_texpage", "float4 a_uv_limits"},
+        1, 1,
+        {{"", "float v_posz"}, {"nointerpolation", "float4 v_uv_limits"}}, false, "", msaa,
+        per_sample_shading, disable_color_perspective);
     }
     else
     {
-      DeclareVertexEntryPoint(ss, {"float4 a_pos", "float4 a_col0", "uint a_texcoord", "uint a_texpage"}, 1, 1, {},
-                              false, "", msaa, per_sample_shading, disable_color_perspective);
+      DeclareVertexEntryPoint(ss,
+                              d3d9 ? std::initializer_list<const char*>{"float4 a_pos", "float4 a_col0",
+                                                                        "float2 a_texcoord", "float2 a_texpage"} :
+                                      std::initializer_list<const char*>{"float4 a_pos", "float4 a_col0",
+                                                                        "uint a_texcoord", "uint a_texpage"},
+                              1, 1, {{"", "float v_posz"}}, false, "", msaa, per_sample_shading,
+                              disable_color_perspective);
     }
   }
   else if (textured)
@@ -108,22 +142,32 @@ std::string GPU_HW_ShaderGen::GenerateBatchVertexShader(bool upscaled, bool msaa
     if (uv_limits)
     {
       DeclareVertexEntryPoint(
-        ss, {"float4 a_pos", "float4 a_col0", "uint a_texcoord", "uint a_texpage", "float4 a_uv_limits"}, 1, 1,
-        {{"nointerpolation", palette ? "uint4 v_texpage" : "uint2 v_texpage"},
+        ss,
+        d3d9 ? std::initializer_list<const char*>{"float4 a_pos", "float4 a_col0", "float2 a_texcoord",
+                                                  "float2 a_texpage", "float4 a_uv_limits"} :
+                std::initializer_list<const char*>{"float4 a_pos", "float4 a_col0", "uint a_texcoord",
+                                                  "uint a_texpage", "float4 a_uv_limits"},
+        1, 1,
+        {{"", "float v_posz"}, {"nointerpolation", d3d9 ? (palette ? "int4 v_texpage" : "int2 v_texpage") : (palette ? "uint4 v_texpage" : "uint2 v_texpage")},
          {"nointerpolation", "float4 v_uv_limits"}},
         false, "", msaa, per_sample_shading, disable_color_perspective);
     }
     else
     {
-      DeclareVertexEntryPoint(ss, {"float4 a_pos", "float4 a_col0", "uint a_texcoord", "uint a_texpage"}, 1, 1,
-                              {{"nointerpolation", palette ? "uint4 v_texpage" : "uint2 v_texpage"}}, false, "", msaa,
-                              per_sample_shading, disable_color_perspective);
+      DeclareVertexEntryPoint(ss,
+                              d3d9 ? std::initializer_list<const char*>{"float4 a_pos", "float4 a_col0",
+                                                                        "float2 a_texcoord", "float2 a_texpage"} :
+                                      std::initializer_list<const char*>{"float4 a_pos", "float4 a_col0",
+                                                                        "uint a_texcoord", "uint a_texpage"},
+                              1, 1,
+                              {{"", "float v_posz"}, {"nointerpolation", d3d9 ? (palette ? "int4 v_texpage" : "int2 v_texpage") : (palette ? "uint4 v_texpage" : "uint2 v_texpage")}},
+                              false, "", msaa, per_sample_shading, disable_color_perspective);
     }
   }
   else
   {
-    DeclareVertexEntryPoint(ss, {"float4 a_pos", "float4 a_col0"}, 1, 0, {}, false, "", msaa, per_sample_shading,
-                            disable_color_perspective);
+    DeclareVertexEntryPoint(ss, {"float4 a_pos", "float4 a_col0"}, 1, 0, {{"", "float v_posz"}}, false, "",
+                            msaa, per_sample_shading, disable_color_perspective);
   }
 
   ss << R"(
@@ -157,21 +201,38 @@ std::string GPU_HW_ShaderGen::GenerateBatchVertexShader(bool upscaled, bool msaa
 #endif
 
   v_pos = float4(pos_x * pos_w, pos_y * pos_w, pos_z * pos_w, pos_w);
+  v_posz = v_pos.z;
 
   v_col0 = a_col0;
   #if TEXTURED
-    v_tex0 = float2(uint2(a_texcoord & 0xFFFFu, a_texcoord >> 16));
+    #if API_D3D9
+      v_tex0 = floor(a_texcoord + float2(0.5, 0.5));
+    #else
+      v_tex0 = float2(uint2(a_texcoord & 0xFFFFu, a_texcoord >> 16));
+    #endif
     #if !PALETTE && !PAGE_TEXTURE
       v_tex0 *= u_resolution_scale;
     #endif
 
     #if !PAGE_TEXTURE
       // base_x,base_y,palette_x,palette_y
-      v_texpage.x = (a_texpage & 15u) * 64u;
-      v_texpage.y = ((a_texpage >> 4) & 1u) * 256u;
+      #if API_D3D9
+        int texpage_lo = int(max(a_texpage.x + 0.5, 0.0));
+        int texpage_hi = int(max(a_texpage.y + 0.5, 0.0));
+        v_texpage.x = (texpage_lo % 16) * 64;
+        v_texpage.y = (texpage_lo / 16) * 256;
+      #else
+        v_texpage.x = (a_texpage & 15u) * 64u;
+        v_texpage.y = ((a_texpage >> 4) & 1u) * 256u;
+      #endif
       #if PALETTE
-        v_texpage.z = ((a_texpage >> 16) & 63u) * 16u;
-        v_texpage.w = ((a_texpage >> 22) & 511u);
+        #if API_D3D9
+          v_texpage.z = (texpage_hi % 64) * 16;
+          v_texpage.w = texpage_hi / 64;
+        #else
+          v_texpage.z = ((a_texpage >> 16) & 63u) * 16u;
+          v_texpage.w = ((a_texpage >> 22) & 511u);
+        #endif
       #endif
     #endif
 
@@ -1264,24 +1325,32 @@ std::string GPU_HW_ShaderGen::GenerateBatchFragmentShader(
     ss << "};\n";
 
   ss << R"(
-uint3 ApplyDithering(uint2 coord, uint3 icol)
+int3 ApplyDithering(int2 coord, int3 icol)
 {
   #if (DITHERING_SCALED != 0 || UPSCALED == 0)
-    uint2 fc = coord & uint2(3u, 3u);
+    int2 fc = coord & int2(3, 3);
   #else
-    uint2 fc = uint2(float2(coord) * u_rcp_resolution_scale) & uint2(3u, 3u);
+    int2 fc = int2(float2(coord) * u_rcp_resolution_scale) & int2(3, 3);
   #endif
-  int offset = s_dither_values[fc.y * 4u + fc.x];
-  return uint3(clamp((int3(icol) + offset) >> 3, 0, 31));
+  int offset = s_dither_values[(fc.y * 4) + fc.x];
+  return clamp((icol + offset) >> 3, 0, 31);
 }
 
 #if TEXTURED
 CONSTANT float4 TRANSPARENT_PIXEL_COLOR = float4(0.0, 0.0, 0.0, 0.0);
 
 #if PALETTE
-  #define TEXPAGE_VALUE uint4
+  #if API_D3D9
+    #define TEXPAGE_VALUE int4
+  #else
+    #define TEXPAGE_VALUE uint4
+  #endif
 #else
-  #define TEXPAGE_VALUE uint2
+  #if API_D3D9
+    #define TEXPAGE_VALUE int2
+  #else
+    #define TEXPAGE_VALUE uint2
+  #endif
 #endif
 
 #if UV_LIMITS
@@ -1292,14 +1361,34 @@ CONSTANT float4 TRANSPARENT_PIXEL_COLOR = float4(0.0, 0.0, 0.0, 0.0);
   #define APPLY_UV_LIMITS(coords, uv_limits) (coords)
 #endif
 
-uint2 ApplyTextureWindow(uint2 coords)
+int ApplyTextureWindowCoord(int coord, uint and_value, uint or_value)
 {
-  uint x = (uint(coords.x) & u_texture_window_and.x) | u_texture_window_or.x;
-  uint y = (uint(coords.y) & u_texture_window_and.y) | u_texture_window_or.y;
-  return uint2(x, y);
+  CONSTANT int bit_weights[5] = {1, 2, 4, 8, 16};
+  const int mask = (255 - int(and_value)) / 8;
+  const int offset = int(or_value) / 8;
+  const int block = coord / 8;
+  const int frac = coord - (block * 8);
+
+  int windowed_block = 0;
+  for (int bit = 0; bit < 5; bit++)
+  {
+    const int weight = bit_weights[bit];
+    const int mask_bit = (mask / weight) % 2;
+    const int block_bit = (block / weight) % 2;
+    const int offset_bit = (offset / weight) % 2;
+    windowed_block += (((1 - mask_bit) * block_bit) + (mask_bit * offset_bit)) * weight;
+  }
+
+  return (windowed_block * 8) + frac;
 }
 
-uint2 FloatToIntegerCoords(DECLARE_UV_LIMITS(float2 coords, float4 uv_limits))
+int2 ApplyTextureWindow(int2 coords)
+{
+  return int2(ApplyTextureWindowCoord(coords.x, u_texture_window_and.x, u_texture_window_or.x),
+              ApplyTextureWindowCoord(coords.y, u_texture_window_and.y, u_texture_window_or.y));
+}
+
+int2 FloatToIntegerCoords(DECLARE_UV_LIMITS(float2 coords, float4 uv_limits))
 {
   // With the vertex offset applied at 1x resolution scale, we want to round the texture coordinates.
   // Floor them otherwise, as it currently breaks when upscaling as the vertex offset is not applied.
@@ -1307,11 +1396,11 @@ uint2 FloatToIntegerCoords(DECLARE_UV_LIMITS(float2 coords, float4 uv_limits))
 #if UPSCALED == 0 || FORCE_ROUND_TEXCOORDS != 0
   float2 rounded_coords = roundEven(coords);
   float2 clamped_coords = APPLY_UV_LIMITS(rounded_coords, uv_limits);
-  return uint2(clamped_coords);
+  return int2(clamped_coords);
 #else
   float2 clamped_coords = APPLY_UV_LIMITS(coords, uv_limits);
   float2 floored_coords = floor(clamped_coords);
-  return uint2(floored_coords);
+  return int2(floored_coords);
 #endif
 }
 
@@ -1320,7 +1409,7 @@ uint2 FloatToIntegerCoords(DECLARE_UV_LIMITS(float2 coords, float4 uv_limits))
 float4 SampleFromPageTexture(DECLARE_UV_LIMITS(float2 coords, float4 uv_limits))
 {
   // Cached textures.
-  uint2 icoord = ApplyTextureWindow(FloatToIntegerCoords(DECLARE_UV_LIMITS(coords, uv_limits)));
+  int2 icoord = ApplyTextureWindow(FloatToIntegerCoords(DECLARE_UV_LIMITS(coords, uv_limits)));
 #if UPSCALED
   float2 fpart = frac(coords);
   coords = (float2(icoord) + fpart);
@@ -1343,15 +1432,19 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
   #if PAGE_TEXTURE
     return SampleFromPageTexture(DECLARE_UV_LIMITS(coords, uv_limits));
   #elif PALETTE
-    uint2 icoord = ApplyTextureWindow(FloatToIntegerCoords(DECLARE_UV_LIMITS(coords, uv_limits)));
+    int2 icoord = ApplyTextureWindow(FloatToIntegerCoords(DECLARE_UV_LIMITS(coords, uv_limits)));
 
-    uint2 vicoord;
+    int2 vicoord;
     #if PALETTE_4_BIT
       // 4bit will never wrap, since it's in the last texpage row.
-      vicoord = uint2(texpage.x + (icoord.x / 4u), texpage.y + icoord.y);
+      vicoord = int2(int(texpage.x) + (icoord.x / 4), int(texpage.y) + icoord.y);
     #elif PALETTE_8_BIT
       // 8bit can wrap in the X direction.
-      vicoord = uint2((texpage.x + (icoord.x / 2u)) & 0x3FFu, texpage.y + icoord.y);
+      #if API_D3D9
+        vicoord = int2((int(texpage.x) + (icoord.x / 2)) % 1024, int(texpage.y) + icoord.y);
+      #else
+        vicoord = int2((int(texpage.x) + (icoord.x / 2)) & 0x3FF, int(texpage.y) + icoord.y);
+      #endif
     #endif
 
     // load colour/palette
@@ -1362,18 +1455,36 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
     #else
       float4 texel = SAMPLE_TEXTURE_LEVEL(samp0, float2(vicoord) * RCP_VRAM_SIZE, 0.0);
     #endif
+#if API_D3D9
+    int vram_value = RGBA8ToRGBA5551(texel);
+#else
     uint vram_value = RGBA8ToRGBA5551(texel);
+#endif
 
     // apply palette
     #if PALETTE_4_BIT
-      uint subpixel = icoord.x & 3u;
+#if API_D3D9
+      int subpixel = icoord.x % 4;
+      int palette_divisor = (subpixel == 0) ? 1 : ((subpixel == 1) ? 16 : ((subpixel == 2) ? 256 : 4096));
+      int palette_index = (vram_value / palette_divisor) % 16;
+      int2 palette_icoord = int2(int(texpage.z) + palette_index, int(texpage.w));
+#else
+      uint subpixel = uint(icoord.x & 3);
       uint palette_index = (vram_value >> (subpixel * 4u)) & 0x0Fu;
-      uint2 palette_icoord = uint2((texpage.z + palette_index), texpage.w);
+      int2 palette_icoord = int2(int(texpage.z + palette_index), int(texpage.w));
+#endif
     #elif PALETTE_8_BIT
       // can only wrap in X direction for 8-bit, 4-bit will fit in texpage size.
-      uint subpixel = icoord.x & 1u;
+#if API_D3D9
+      int subpixel = icoord.x % 2;
+      int palette_divisor = (subpixel == 0) ? 1 : 256;
+      int palette_index = (vram_value / palette_divisor) % 256;
+      int2 palette_icoord = int2((int(texpage.z) + palette_index) % 1024, int(texpage.w));
+#else
+      uint subpixel = uint(icoord.x & 1);
       uint palette_index = (vram_value >> (subpixel * 8u)) & 0xFFu;
-      uint2 palette_icoord = uint2(((texpage.z + palette_index) & 0x3FFu), texpage.w);
+      int2 palette_icoord = int2(int((texpage.z + palette_index) & 0x3FFu), int(texpage.w));
+#endif
     #endif
 
     #if !UPSCALED
@@ -1384,8 +1495,12 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
   #else
     // Direct texturing - usually render-to-texture effects.
     #if !UPSCALED
-      uint2 icoord = ApplyTextureWindow(FloatToIntegerCoords(DECLARE_UV_LIMITS(coords, uv_limits)));
-      uint2 vicoord = (texpage.xy + icoord) & uint2(1023, 511);
+      int2 icoord = ApplyTextureWindow(FloatToIntegerCoords(DECLARE_UV_LIMITS(coords, uv_limits)));
+      #if API_D3D9
+        int2 vicoord = int2((int(texpage.x) + icoord.x) % 1024, (int(texpage.y) + icoord.y) % 512);
+      #else
+        int2 vicoord = (int2(texpage.xy) + icoord) & int2(1023, 511);
+      #endif
       return LOAD_TEXTURE(samp0, int2(vicoord), 0);
     #else
       // Coordinates are already upscaled, we need to downscale them to apply the texture
@@ -1393,8 +1508,12 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
       // going outside of the texture window.
       float2 ncoords = APPLY_UV_LIMITS(coords, uv_limits) * u_rcp_resolution_scale;
       float2 nfpart = frac(ncoords);
-      uint2 nicoord = ApplyTextureWindow(uint2(floor(ncoords)));
-      uint2 nvicoord = (texpage.xy + nicoord) & uint2(1023, 511);
+      int2 nicoord = ApplyTextureWindow(int2(floor(ncoords)));
+      #if API_D3D9
+        int2 nvicoord = int2((int(texpage.x) + nicoord.x) % 1024, (int(texpage.y) + nicoord.y) % 512);
+      #else
+        int2 nvicoord = (int2(texpage.xy) + nicoord) & int2(1023, 511);
+      #endif
       ncoords = (float2(nvicoord) + nfpart);
       return SAMPLE_TEXTURE_LEVEL(samp0, ncoords * RCP_VRAM_SIZE, 0.0);
     #endif
@@ -1414,15 +1533,15 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
 
     if (uv_limits)
     {
-      DeclareFragmentEntryPoint(ss, 1, 1, {{"nointerpolation", "float4 v_uv_limits"}}, true, num_fragment_outputs,
+      DeclareFragmentEntryPoint(ss, 1, 1, {{"", "float v_posz"}, {"nointerpolation", "float4 v_uv_limits"}}, true, num_fragment_outputs,
                                 use_dual_source, write_mask_as_depth, msaa, per_sample_shading, false,
                                 disable_color_perspective, shader_blending && !use_rov, use_rov);
     }
     else
     {
-      DeclareFragmentEntryPoint(ss, 1, 1, {}, true, num_fragment_outputs, use_dual_source, write_mask_as_depth, msaa,
-                                per_sample_shading, false, disable_color_perspective, shader_blending && !use_rov,
-                                use_rov);
+      DeclareFragmentEntryPoint(ss, 1, 1, {{"", "float v_posz"}}, true, num_fragment_outputs, use_dual_source,
+                                write_mask_as_depth, msaa, per_sample_shading, false, disable_color_perspective,
+                                shader_blending && !use_rov, use_rov);
     }
   }
   else if (textured)
@@ -1433,7 +1552,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
     if (uv_limits)
     {
       DeclareFragmentEntryPoint(ss, 1, 1,
-                                {{"nointerpolation", palette ? "uint4 v_texpage" : "uint2 v_texpage"},
+                                {{"", "float v_posz"}, {"nointerpolation", palette ? "uint4 v_texpage" : "uint2 v_texpage"},
                                  {"nointerpolation", "float4 v_uv_limits"}},
                                 true, num_fragment_outputs, use_dual_source, write_mask_as_depth, msaa,
                                 per_sample_shading, false, disable_color_perspective, shader_blending && !use_rov,
@@ -1441,34 +1560,35 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
     }
     else
     {
-      DeclareFragmentEntryPoint(ss, 1, 1, {{"nointerpolation", palette ? "uint4 v_texpage" : "uint2 v_texpage"}}, true,
+      DeclareFragmentEntryPoint(ss, 1, 1,
+                                {{"", "float v_posz"}, {"nointerpolation", palette ? "uint4 v_texpage" : "uint2 v_texpage"}}, true,
                                 num_fragment_outputs, use_dual_source, write_mask_as_depth, msaa, per_sample_shading,
                                 false, disable_color_perspective, shader_blending && !use_rov, use_rov);
     }
   }
   else
   {
-    DeclareFragmentEntryPoint(ss, 1, 0, {}, true, num_fragment_outputs, use_dual_source, write_mask_as_depth, msaa,
-                              per_sample_shading, false, disable_color_perspective, shader_blending && !use_rov,
-                              use_rov);
+    DeclareFragmentEntryPoint(ss, 1, 0, {{"", "float v_posz"}}, true, num_fragment_outputs, use_dual_source,
+                              write_mask_as_depth, msaa, per_sample_shading, false, disable_color_perspective,
+                              shader_blending && !use_rov, use_rov);
   }
 
   ss << R"(
 {
-  uint3 vertcol = uint3(v_col0.rgb * float3(255.0, 255.0, 255.0));
-  uint2 fragpos = uint2(v_pos.xy);
+  int3 vertcol = int3(v_col0.rgb * float3(255.0, 255.0, 255.0));
+  int2 fragpos = int2(v_pos.xy);
 
   bool semitransparent;
-  uint3 icolor;
+  int3 icolor;
   float ialpha;
   float oalpha;
 
   #if INTERLACING
     #if INTERLACING_SCALED || !UPSCALED
-      if ((fragpos.y & 1u) == u_interlaced_displayed_field)
+      if ((fragpos.y & 1) == int(u_interlaced_displayed_field))
         discard;
     #else
-      if ((uint(v_pos.y * u_rcp_resolution_scale) & 1u) == u_interlaced_displayed_field)
+      if ((int(v_pos.y * u_rcp_resolution_scale) & 1) == int(u_interlaced_displayed_field))
         discard;
     #endif
   #endif
@@ -1501,25 +1621,46 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
 
     // If not using true color, truncate the framebuffer colors to 5-bit.
     #if !TRUE_COLOR
-      icolor = uint3(texcol.rgb * float3(255.0, 255.0, 255.0)) >> 3;
-      #if MODULATION_CROP
-        icolor = (icolor * (vertcol >> 3)) >> 1;
+      #if API_D3D9
+        icolor = int3(texcol.rgb * float3(255.0, 255.0, 255.0)) / 8;
+        #if MODULATION_CROP
+          icolor = (icolor * (vertcol / 8)) / 2;
+        #else
+          icolor = (icolor * vertcol) / 16;
+        #endif
       #else
-        icolor = (icolor * vertcol) >> 4;
+        icolor = int3(texcol.rgb * float3(255.0, 255.0, 255.0)) >> 3;       
+        #if MODULATION_CROP
+          icolor = (icolor * (vertcol >> 3)) >> 1;
+        #else
+          icolor = (icolor * vertcol) >> 4;
+        #endif
       #endif
       #if DITHERING
         icolor = ApplyDithering(fragpos, icolor);
       #else
-        icolor = min(icolor >> 3, uint3(31u, 31u, 31u));
+        #if API_D3D9
+          icolor = min(icolor / 8, int3(31, 31, 31));
+        #else
+          icolor = min(icolor >> 3, int3(31, 31, 31));
+        #endif
       #endif
     #else
-      icolor = uint3(texcol.rgb * float3(255.0, 255.0, 255.0));
-      #if MODULATION_CROP
-        icolor = (icolor * (vertcol >> 3)) >> 4;
+      icolor = int3(texcol.rgb * float3(255.0, 255.0, 255.0));
+      #if API_D3D9
+        #if MODULATION_CROP
+          icolor = (icolor * (vertcol / 8)) / 16;
+        #else
+          icolor = (icolor * vertcol) / 128;
+        #endif
       #else
-        icolor = (icolor * vertcol) >> 7;
+        #if MODULATION_CROP
+          icolor = (icolor * (vertcol >> 3)) >> 4;
+        #else
+          icolor = (icolor * vertcol) >> 7;
+        #endif
       #endif
-      icolor = min(icolor, uint3(255u, 255u, 255u));
+      icolor = min(icolor, int3(255, 255, 255));
     #endif
 
     // Compute output alpha (mask bit)
@@ -1551,7 +1692,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
 
       #if ROV_DEPTH_TEST
         float bg_depth = ROV_LOAD(rov_depth, fragpos).r;
-        discarded = (v_pos.z > bg_depth);
+        discarded = (v_posz > bg_depth);
       #endif
       #if CHECK_MASK_BIT
         discarded = discarded || (bg_col.a != 0.0);
@@ -1620,7 +1761,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
       {
         ROV_STORE(rov_color, fragpos, o_col0);
         #if USE_ROV_DEPTH && ROV_DEPTH_WRITE
-          ROV_STORE(rov_depth, fragpos, float4(v_pos.z, 0.0, 0.0, 0.0));
+          ROV_STORE(rov_depth, fragpos, float4(v_posz, 0.0, 0.0, 0.0));
         #endif
       }
       END_ROV_REGION;
@@ -1654,7 +1795,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
         #endif
 
         #if WRITE_MASK_AS_DEPTH
-          o_depth = oalpha * v_pos.z;
+          o_depth = oalpha * v_posz;
         #endif
 
         #if TRANSPARENCY_ONLY_OPAQUE
@@ -1671,7 +1812,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
         #endif
 
         #if WRITE_MASK_AS_DEPTH
-          o_depth = oalpha * v_pos.z;
+          o_depth = oalpha * v_posz;
         #endif
 
         #if TRANSPARENCY_ONLY_TRANSPARENT
@@ -1688,7 +1829,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
       #endif
 
       #if WRITE_MASK_AS_DEPTH
-        o_depth = oalpha * v_pos.z;
+        o_depth = oalpha * v_posz;
       #endif
     #else
       // Non-transparency won't enable blending so we can write the mask here regardless.
@@ -1699,7 +1840,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, DECLARE_UV_LIMITS(float2 coords, fl
       #endif
 
       #if WRITE_MASK_AS_DEPTH
-        o_depth = oalpha * v_pos.z;
+        o_depth = oalpha * v_posz;
       #endif
     #endif
   #endif
@@ -1760,9 +1901,29 @@ float LoadDepth(int2 coords)
 }
 #endif
 
+#if API_D3D9
+float3 SampleVRAM24(int2 icoords)
+#else
 float3 SampleVRAM24(uint2 icoords)
+#endif
 {
   // load adjacent 16-bit texels
+#if API_D3D9
+  int2 clamp_size = int2(1024, 512);
+
+  // relative to start of scanout
+  int2 vram_coords = int2(u_vram_offset) + int2((icoords.x * 3) / 2, icoords.y);
+  int s0 = RGBA8ToRGBA5551(LoadVRAM((vram_coords % clamp_size) * int(RESOLUTION_SCALE)));
+  int s1 = RGBA8ToRGBA5551(LoadVRAM(((vram_coords + int2(1, 0)) % clamp_size) * int(RESOLUTION_SCALE)));
+
+  // select which part of the combined 16-bit texels we are currently shading
+  int byte_divisor = ((icoords.x % 2) == 0) ? 1 : 256;
+  int s1s0 = (s0 + (s1 * 65536)) / byte_divisor;
+
+  // extract components and normalize
+  return float3(float(s1s0 % 256) / 255.0, float((s1s0 / 256) % 256) / 255.0,
+                float((s1s0 / 65536) % 256) / 255.0);
+#else
   uint2 clamp_size = uint2(1024, 512);
 
   // relative to start of scanout
@@ -1776,6 +1937,7 @@ float3 SampleVRAM24(uint2 icoords)
   // extract components and normalize
   return float3(float(s1s0 & 0xFFu) / 255.0, float((s1s0 >> 8u) & 0xFFu) / 255.0,
                 float((s1s0 >> 16u) & 0xFFu) / 255.0);
+#endif
 }
 )";
 
@@ -1784,8 +1946,13 @@ float3 SampleVRAM24(uint2 icoords)
 {
   // Have to floor because SV_Position is at the pixel center.
   float2 v_pos_floored = floor(v_pos.xy);
+#if API_D3D9
+  int2 icoords = int2(int(v_pos_floored.x + u_skip_x), int(v_pos_floored.y * u_line_skip));
+  int2 wrapped_coords = (icoords + int2(u_vram_offset)) % int2(VRAM_SIZE);
+#else
   uint2 icoords = uint2(v_pos_floored.x + u_skip_x, v_pos_floored.y * u_line_skip);
   int2 wrapped_coords = int2((icoords + u_vram_offset) % VRAM_SIZE);
+#endif
 
   #if COLOR_24BIT
     o_col0 = float4(SampleVRAM24(icoords), 1.0);
@@ -1935,8 +2102,27 @@ float4 LoadVRAM(int2 coords)
 #endif
 }
 
+#if API_D3D9
+int SampleVRAM(int2 coords)
+#else
 uint SampleVRAM(uint2 coords)
+#endif
 {
+#if API_D3D9
+  if (RESOLUTION_SCALE == 1u)
+    return RGBA8ToRGBA5551(LoadVRAM(coords));
+
+  // Box filter for downsampling.
+  float4 value = float4(0.0, 0.0, 0.0, 0.0);
+  int2 base_coords = coords * int2(int(RESOLUTION_SCALE), int(RESOLUTION_SCALE));
+  for (int offset_x = 0; offset_x < int(RESOLUTION_SCALE); offset_x++)
+  {
+    for (int offset_y = 0; offset_y < int(RESOLUTION_SCALE); offset_y++)
+      value += LoadVRAM(base_coords + int2(offset_x, offset_y));
+  }
+  value /= float(RESOLUTION_SCALE * RESOLUTION_SCALE);
+  return RGBA8ToRGBA5551(value);
+#else
   if (RESOLUTION_SCALE == 1u)
     return RGBA8ToRGBA5551(LoadVRAM(int2(coords)));
 
@@ -1950,12 +2136,24 @@ uint SampleVRAM(uint2 coords)
   }
   value /= float(RESOLUTION_SCALE * RESOLUTION_SCALE);
   return RGBA8ToRGBA5551(value);
+#endif
 }
 )";
 
   DeclareFragmentEntryPoint(ss, 0, 1, {}, true, 1);
   ss << R"(
 {
+#if API_D3D9
+  int2 sample_coords = int2(int(v_pos.x) * 2, int(v_pos.y)) + int2(u_base_coords);
+
+  // We're encoding as 32-bit, so the output width is halved and we pack two 16-bit pixels in one 32-bit pixel.
+  int left = SampleVRAM(sample_coords);
+  int right = SampleVRAM(int2(sample_coords.x + 1, sample_coords.y));
+
+  o_col0 = float4(float(left % 256), float((left / 256) % 256),
+                  float(right % 256), float((right / 256) % 256))
+            / float4(255.0, 255.0, 255.0, 255.0);
+#else
   uint2 sample_coords = uint2(uint(v_pos.x) * 2u, uint(v_pos.y));
   sample_coords += u_base_coords;
 
@@ -1966,6 +2164,7 @@ uint SampleVRAM(uint2 coords)
   o_col0 = float4(float(left & 0xFFu), float((left >> 8) & 0xFFu),
                   float(right & 0xFFu), float((right >> 8) & 0xFFu))
             / float4(255.0, 255.0, 255.0, 255.0);
+#endif
 })";
 
   return std::move(ss).str();
@@ -2035,10 +2234,20 @@ std::string GPU_HW_ShaderGen::GenerateVRAMWriteFragmentShader(bool use_buffer, b
   offset.y = (coords.y < u_base_coords.y) ? (VRAM_SIZE.y - u_base_coords.y + coords.y) : (coords.y - u_base_coords.y);
 
 #if !USE_BUFFER
+#if API_D3D9
+  int value = int(LOAD_TEXTURE(samp0, int2(offset), 0).x);
+#else
   uint value = LOAD_TEXTURE(samp0, int2(offset), 0).x;
+#endif
 #else
   uint buffer_offset = u_buffer_base_offset + uint((offset.y * u_size.x) + offset.x);
+#if API_D3D9
+  int value = int(GET_VALUE(buffer_offset));
+  if (u_mask_or_bits != 0u && value < 32768)
+    value += 32768;
+#else
   uint value = GET_VALUE(buffer_offset) | u_mask_or_bits;
+#endif
 #endif
 
   o_col0 = RGBA5551ToRGBA8(value);
@@ -2130,18 +2339,31 @@ std::string GPU_HW_ShaderGen::GenerateVRAMFillFragmentShader(bool wrapped, bool 
   ss << R"(
 {
 #if INTERLACED || WRAPPED
-  uint2 dst_coords = uint2(v_pos.xy);
+  #if API_D3D9
+    int2 dst_coords = int2(v_pos.xy);
+  #else
+    uint2 dst_coords = uint2(v_pos.xy);
+  #endif
 #endif
 
 #if INTERLACED
-  if ((dst_coords.y & 1u) == u_interlaced_displayed_field)
+  #if API_D3D9
+    if ((dst_coords.y % 2) == int(u_interlaced_displayed_field))
+  #else
+    if ((dst_coords.y & 1u) == u_interlaced_displayed_field)
+  #endif
     discard;
 #endif
 
 #if WRAPPED
   // make sure it's not oversized and out of range
-  if ((dst_coords.x < u_dst_coords.x && dst_coords.x >= u_end_coords.x) ||
-      (dst_coords.y < u_dst_coords.y && dst_coords.y >= u_end_coords.y))
+  #if API_D3D9
+    if ((dst_coords.x < int(u_dst_coords.x) && dst_coords.x >= int(u_end_coords.x)) ||
+        (dst_coords.y < int(u_dst_coords.y) && dst_coords.y >= int(u_end_coords.y)))
+  #else
+    if ((dst_coords.x < u_dst_coords.x && dst_coords.x >= u_end_coords.x) ||
+        (dst_coords.y < u_dst_coords.y && dst_coords.y >= u_end_coords.y))
+  #endif
   {
     discard;
   }
@@ -2164,7 +2386,8 @@ std::string GPU_HW_ShaderGen::GenerateVRAMUpdateDepthFragmentShader(bool msaa) c
   WriteHeader(ss);
   DefineMacro(ss, "MULTISAMPLING", msaa);
   DeclareTexture(ss, "samp0", 0, msaa);
-  DeclareFragmentEntryPoint(ss, 0, 1, {}, true, 0, false, true, false, false, msaa);
+  DeclareFragmentEntryPoint(ss, 0, 1, {}, true, (m_render_api == RenderAPI::D3D9) ? 1u : 0u, false, true, false,
+                            false, msaa);
 
   ss << R"(
 {
@@ -2172,6 +2395,9 @@ std::string GPU_HW_ShaderGen::GenerateVRAMUpdateDepthFragmentShader(bool msaa) c
   o_depth = LOAD_TEXTURE_MS(samp0, int2(v_pos.xy), f_sample_index).a;
 #else
   o_depth = LOAD_TEXTURE(samp0, int2(v_pos.xy), 0).a;
+#endif
+#if API_D3D9
+  o_col0 = float4(0.0, 0.0, 0.0, 0.0);
 #endif
 }
 )";

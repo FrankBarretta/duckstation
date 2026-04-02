@@ -10,12 +10,46 @@
 #include <cstdio>
 #include <cstring>
 #include <iomanip>
+#include <string>
 
 #ifdef ENABLE_OPENGL
 #include "opengl_loader.h"
 #endif
 
 LOG_CHANNEL(ShaderGen);
+
+namespace
+{
+const char* GetDeclarationName(const char* declaration)
+{
+  const char* last_space = std::strrchr(declaration, ' ');
+  return last_space ? (last_space + 1) : declaration;
+}
+
+std::string GetD3D9AttributeSemantic(const char* declaration, u32* color_index, u32* texcoord_index)
+{
+  const char* name = GetDeclarationName(declaration);
+  if (std::strstr(name, "pos") != nullptr)
+    return "POSITION0";
+
+  if (std::strstr(name, "col") != nullptr)
+    return std::string("COLOR") + std::to_string((*color_index)++);
+
+  return std::string("TEXCOORD") + std::to_string((*texcoord_index)++);
+}
+
+u32 GetD3D9RegisterCountForType(const char* declaration)
+{
+  if (std::strncmp(declaration, "float4x4 ", 9) == 0)
+    return 4;
+  if (std::strncmp(declaration, "float3x3 ", 9) == 0)
+    return 3;
+  if (std::strncmp(declaration, "float2x2 ", 9) == 0)
+    return 2;
+
+  return 1;
+}
+}
 
 ShaderGen::ShaderGen(RenderAPI render_api, GPUShaderLanguage shader_language, bool supports_dual_source_blend,
                      bool supports_framebuffer_fetch)
@@ -63,6 +97,7 @@ GPUShaderLanguage ShaderGen::GetShaderLanguageForAPI(RenderAPI api)
 {
   switch (api)
   {
+    case RenderAPI::D3D9:
     case RenderAPI::D3D11:
     case RenderAPI::D3D12:
       return GPUShaderLanguage::HLSL;
@@ -237,6 +272,7 @@ void ShaderGen::WriteHeader(std::stringstream& ss, bool enable_rov /* = false */
 
   DefineMacro(ss, "API_OPENGL", m_render_api == RenderAPI::OpenGL);
   DefineMacro(ss, "API_OPENGL_ES", m_render_api == RenderAPI::OpenGLES);
+  DefineMacro(ss, "API_D3D9", m_render_api == RenderAPI::D3D9);
   DefineMacro(ss, "API_D3D11", m_render_api == RenderAPI::D3D11);
   DefineMacro(ss, "API_D3D12", m_render_api == RenderAPI::D3D12);
   DefineMacro(ss, "API_VULKAN", m_render_api == RenderAPI::Vulkan);
@@ -344,15 +380,29 @@ void ShaderGen::WriteHeader(std::stringstream& ss, bool enable_rov /* = false */
     ss << "#define VECTOR_NEQ(a, b) (any((a) != (b)))\n";
     ss << "#define VECTOR_COMP_EQ(a, b) ((a) == (b))\n";
     ss << "#define VECTOR_COMP_NEQ(a, b) ((a) != (b))\n";
-    ss << "#define SAMPLE_TEXTURE(name, coords) name.Sample(name##_ss, coords)\n";
-    ss << "#define SAMPLE_TEXTURE_OFFSET(name, coords, offset) name.Sample(name##_ss, coords, offset)\n";
-    ss << "#define SAMPLE_TEXTURE_LEVEL(name, coords, level) name.SampleLevel(name##_ss, coords, level)\n";
-    ss << "#define SAMPLE_TEXTURE_LEVEL_OFFSET(name, coords, level, offset) name.SampleLevel(name##_ss, coords, level, "
-          "offset)\n";
-    ss << "#define LOAD_TEXTURE(name, coords, mip) name.Load(int3(coords, mip))\n";
-    ss << "#define LOAD_TEXTURE_MS(name, coords, sample) name.Load(coords, sample)\n";
-    ss << "#define LOAD_TEXTURE_OFFSET(name, coords, mip, offset) name.Load(int3(coords, mip), offset)\n";
-    ss << "#define LOAD_TEXTURE_BUFFER(name, index) name.Load(index)\n";
+    if (m_render_api == RenderAPI::D3D9)
+    {
+      ss << "#define SAMPLE_TEXTURE(name, coords) tex2D(name, coords)\n";
+      ss << "#define SAMPLE_TEXTURE_OFFSET(name, coords, offset) tex2D(name, coords)\n";
+      ss << "#define SAMPLE_TEXTURE_LEVEL(name, coords, level) tex2Dlod(name, float4(coords, 0.0f, level))\n";
+      ss << "#define SAMPLE_TEXTURE_LEVEL_OFFSET(name, coords, level, offset) tex2Dlod(name, float4(coords, 0.0f, level))\n";
+      ss << "#define LOAD_TEXTURE(name, coords, mip) tex2Dlod(name, float4(float2(coords), 0.0f, float(mip)))\n";
+      ss << "#define LOAD_TEXTURE_MS(name, coords, sample) tex2Dlod(name, float4(float2(coords), 0.0f, 0.0f))\n";
+      ss << "#define LOAD_TEXTURE_OFFSET(name, coords, mip, offset) tex2Dlod(name, float4(float2(coords), 0.0f, float(mip)))\n";
+      ss << "#define LOAD_TEXTURE_BUFFER(name, index) tex2Dlod(name, float4(float2(index, 0), 0.0f, 0.0f))\n";
+    }
+    else
+    {
+      ss << "#define SAMPLE_TEXTURE(name, coords) name.Sample(name##_ss, coords)\n";
+      ss << "#define SAMPLE_TEXTURE_OFFSET(name, coords, offset) name.Sample(name##_ss, coords, offset)\n";
+      ss << "#define SAMPLE_TEXTURE_LEVEL(name, coords, level) name.SampleLevel(name##_ss, coords, level)\n";
+      ss << "#define SAMPLE_TEXTURE_LEVEL_OFFSET(name, coords, level, offset) name.SampleLevel(name##_ss, coords, level, "
+            "offset)\n";
+      ss << "#define LOAD_TEXTURE(name, coords, mip) name.Load(int3(coords, mip))\n";
+      ss << "#define LOAD_TEXTURE_MS(name, coords, sample) name.Load(coords, sample)\n";
+      ss << "#define LOAD_TEXTURE_OFFSET(name, coords, mip, offset) name.Load(int3(coords, mip), offset)\n";
+      ss << "#define LOAD_TEXTURE_BUFFER(name, index) name.Load(index)\n";
+    }
     ss << "#define BEGIN_ARRAY(type, size) {\n";
     ss << "#define END_ARRAY }\n";
     ss << "#define VECTOR_BROADCAST(type, value) ((type)(value))\n";
@@ -406,6 +456,9 @@ void ShaderGen::WriteUniformBufferDeclaration(std::stringstream& ss, bool push_c
   }
   else
   {
+    if (m_render_api == RenderAPI::D3D9)
+      return;
+
     ss << "cbuffer " << name << " : register(b" << binding << ")\n";
     m_has_uniform_buffer = true;
   }
@@ -414,6 +467,19 @@ void ShaderGen::WriteUniformBufferDeclaration(std::stringstream& ss, bool push_c
 void ShaderGen::DeclareUniformBuffer(std::stringstream& ss, const std::initializer_list<const char*>& members,
                                      bool push_constant) const
 {
+  if (!m_glsl && m_render_api == RenderAPI::D3D9)
+  {
+    u32 register_index = push_constant ? 32u : 0u;
+    for (const char* member : members)
+    {
+      ss << member << " : register(c" << register_index << ");\n";
+      register_index += GetD3D9RegisterCountForType(member);
+    }
+    ss << "\n";
+    m_has_uniform_buffer = true;
+    return;
+  }
+
   WriteUniformBufferDeclaration(ss, push_constant);
 
   ss << "{\n";
@@ -437,6 +503,12 @@ void ShaderGen::DeclareTexture(std::stringstream& ss, const char* name, u32 inde
   }
   else
   {
+    if (m_render_api == RenderAPI::D3D9)
+    {
+      ss << "sampler2D " << name << " : register(s" << index << ");\n";
+      return;
+    }
+
     ss << (multisampled ? "Texture2DMS<" : "Texture2D<") << (is_int ? (is_unsigned ? "uint4" : "int4") : "float4")
        << "> " << name << " : register(t" << index << ");\n";
     ss << "SamplerState " << name << "_ss : register(s" << index << ");\n";
@@ -457,6 +529,12 @@ void ShaderGen::DeclareTextureBuffer(std::stringstream& ss, const char* name, u3
   }
   else
   {
+    if (m_render_api == RenderAPI::D3D9)
+    {
+      ss << "sampler2D " << name << " : register(s" << index << ");\n";
+      return;
+    }
+
     ss << "Buffer<" << (is_int ? (is_unsigned ? "uint4" : "int4") : "float4") << "> " << name << " : register(t"
        << index << ");\n";
   }
@@ -595,13 +673,23 @@ void ShaderGen::DeclareVertexEntryPoint(
 
     ss << "void main(\n";
 
+    if (m_render_api == RenderAPI::D3D9)
+      DebugAssert(!declare_vertex_id);
+
     if (declare_vertex_id)
       ss << "  in uint v_id : SV_VertexID,\n";
 
     u32 attribute_counter = 0;
+    u32 color_counter = 0;
+    u32 texcoord_counter = 0;
     for (const char* attribute : attributes)
     {
-      ss << "  in " << attribute << " : ATTR" << attribute_counter << ",\n";
+      ss << "  in " << attribute << " : ";
+      if (m_render_api == RenderAPI::D3D9)
+        ss << GetD3D9AttributeSemantic(attribute, &color_counter, &texcoord_counter);
+      else
+        ss << "ATTR" << attribute_counter;
+      ss << ",\n";
       attribute_counter++;
     }
 
@@ -620,7 +708,7 @@ void ShaderGen::DeclareVertexEntryPoint(
       additional_counter++;
     }
 
-    ss << "  out float4 v_pos : SV_Position)\n";
+    ss << "  out float4 v_pos : " << (m_render_api == RenderAPI::D3D9 ? "POSITION" : "SV_Position") << ")\n";
   }
 }
 
@@ -825,23 +913,28 @@ void ShaderGen::DeclareFragmentEntryPoint(
 
     if (declare_fragcoord)
     {
-      ss << (first ? "" : ",\n") << "  in float4 v_pos : SV_Position";
+      ss << (first ? "" : ",\n") << "  in " << (m_render_api == RenderAPI::D3D9 ? "float2" : "float4")
+         << " v_pos : " << (m_render_api == RenderAPI::D3D9 ? "VPOS" : "SV_Position");
       first = false;
     }
     if (declare_sample_id)
     {
+      if (m_render_api == RenderAPI::D3D9)
+        DebugAssert(false);
       ss << (first ? "" : ",\n") << "  in uint f_sample_index : SV_SampleIndex";
       first = false;
     }
 
     if (depth_output)
     {
-      ss << (first ? "" : ",\n") << "  out float o_depth : SV_Depth";
+      ss << (first ? "" : ",\n") << "  out float o_depth : " << (m_render_api == RenderAPI::D3D9 ? "DEPTH" : "SV_Depth");
       first = false;
     }
     for (u32 i = 0; i < num_color_outputs; i++)
     {
-      ss << (first ? "" : ",\n") << "  out float4 o_col" << i << " : SV_Target" << i;
+      ss << (first ? "" : ",\n") << "  out float4 o_col" << i << " : "
+        << (m_render_api == RenderAPI::D3D9 ? (std::string("COLOR") + std::to_string(i)) :
+                                  (std::string("SV_Target") + std::to_string(i)));
       first = false;
     }
 
@@ -851,6 +944,17 @@ void ShaderGen::DeclareFragmentEntryPoint(
 
 std::string ShaderGen::GeneratePassthroughVertexShader() const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    return R"(
+float4 main(in float2 a_pos : POSITION0, in float2 a_tex0 : TEXCOORD0, out float2 v_tex0 : TEXCOORD0) : POSITION
+{
+  v_tex0 = a_tex0;
+  return float4(a_pos, 0.0f, 1.0f);
+}
+)";
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
   DeclareVertexEntryPoint(ss, {"float2 a_pos", "float2 a_tex0"}, 0, 1, {}, false, "", false, false, false);
@@ -871,6 +975,17 @@ std::string ShaderGen::GeneratePassthroughVertexShader() const
 
 std::string ShaderGen::GenerateScreenQuadVertexShader(float z /* = 0.0f */) const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    std::stringstream ss;
+    ss << "float4 main(in float2 a_pos : POSITION0, in float2 a_tex0 : TEXCOORD0, out float2 v_tex0 : TEXCOORD0) : POSITION\n";
+    ss << "{\n";
+    ss << "  v_tex0 = a_tex0;\n";
+    ss << "  return float4(a_pos.xy, " << std::fixed << z << "f, 1.0f);\n";
+    ss << "}\n";
+    return std::move(ss).str();
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
   DeclareVertexEntryPoint(ss, {}, 0, 1, {}, true);
@@ -917,6 +1032,21 @@ std::string ShaderGen::GenerateFillFragmentShader(const GSVector4 fixed_color) c
 
 std::string ShaderGen::GenerateCopyFragmentShader(bool offset) const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    std::stringstream ss;
+    ss << "sampler2D samp0 : register(s0);\n";
+    if (offset)
+      ss << "float4 PushConstants0 : register(c32);\n";
+    ss << "\nfloat4 main(in float2 v_tex0 : TEXCOORD0) : COLOR0\n{\n";
+    if (offset)
+      ss << "  float2 coords = PushConstants0.xy + v_tex0 * PushConstants0.zw;\n  return tex2D(samp0, coords);\n";
+    else
+      ss << "  return tex2D(samp0, v_tex0);\n";
+    ss << "}\n";
+    return std::move(ss).str();
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
   if (offset)
@@ -948,6 +1078,21 @@ std::string ShaderGen::GenerateCopyFragmentShader(bool offset) const
 
 std::string ShaderGen::GenerateImGuiVertexShader() const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    return R"(
+float4x4 ProjectionMatrix : register(c0);
+
+void main(in float2 a_pos : POSITION0, in float2 a_tex0 : TEXCOORD0, in float4 a_col0 : COLOR0,
+          out float4 v_col0 : COLOR0, out float2 v_tex0 : TEXCOORD0, out float4 v_pos : POSITION)
+{
+  v_pos = mul(ProjectionMatrix, float4(a_pos, 0.0f, 1.0f));
+  v_col0 = a_col0;
+  v_tex0 = a_tex0;
+}
+)";
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
   DeclareUniformBuffer(ss, {"float4x4 ProjectionMatrix"}, false);
@@ -968,6 +1113,18 @@ std::string ShaderGen::GenerateImGuiVertexShader() const
 
 std::string ShaderGen::GenerateImGuiFragmentShader() const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    return R"(
+sampler2D samp0 : register(s0);
+
+float4 main(in float4 v_col0 : COLOR0, in float2 v_tex0 : TEXCOORD0) : COLOR0
+{
+  return v_col0 * tex2D(samp0, v_tex0);
+}
+  )";
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
   DeclareUniformBuffer(ss, {"float4x4 ProjectionMatrix"}, false); // needs the descriptor set defined
@@ -985,6 +1142,21 @@ std::string ShaderGen::GenerateImGuiFragmentShader() const
 
 std::string ShaderGen::GenerateImGuiBlurVertexShader() const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    return R"(
+float4x4 ProjectionMatrix : register(c0);
+
+void main(in float2 a_pos : POSITION0, in float4 a_col0 : COLOR0,
+          out float4 v_col0 : COLOR0, out float2 v_screen0 : TEXCOORD0, out float4 v_pos : POSITION)
+{
+  v_pos = mul(ProjectionMatrix, float4(a_pos, 0.0f, 1.0f));
+  v_col0 = a_col0;
+  v_screen0 = a_pos;
+}
+)";
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
   DeclareUniformBuffer(ss, {"float4x4 ProjectionMatrix"}, false);
@@ -1006,6 +1178,21 @@ std::string ShaderGen::GenerateImGuiBlurVertexShader() const
 
 std::string ShaderGen::GenerateImGuiBlurFragmentShader() const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    return R"(
+sampler2D samp0 : register(s0);
+float4 PushConstants0 : register(c32);
+
+float4 main(in float4 v_col0 : COLOR0, in float2 v_screen0 : TEXCOORD0) : COLOR0
+{
+  float2 blur_uv = (floor(v_screen0) + float2(0.5f, 0.5f)) * PushConstants0.xy;
+  float3 blurred = tex2D(samp0, blur_uv).rgb;
+  return float4(blurred * PushConstants0.z + v_col0.rgb * PushConstants0.w, v_col0.a);
+}
+)";
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
   DeclareUniformBuffer(ss, {"float4x4 ProjectionMatrix"}, false); // needs the descriptor set defined
@@ -1026,6 +1213,23 @@ std::string ShaderGen::GenerateImGuiBlurFragmentShader() const
 
 std::string ShaderGen::GenerateFadeFragmentShader() const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    return R"(
+sampler2D samp0 : register(s0);
+sampler2D samp1 : register(s1);
+float4 PushConstants0 : register(c32);
+
+float4 main(in float2 v_tex0 : TEXCOORD0) : COLOR0
+{
+  float4 color = tex2D(samp0, v_tex0) * PushConstants0.x;
+  color += tex2D(samp1, v_tex0) * PushConstants0.y;
+  color.a = 1.0f;
+  return color;
+}
+)";
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
   DeclareUniformBuffer(ss, {"float u_tex0_weight", "float u_tex1_weight"}, true);
@@ -1046,6 +1250,96 @@ std::string ShaderGen::GenerateFadeFragmentShader() const
 
 std::string ShaderGen::GenerateGaussianBlurFragmentShader() const
 {
+  if (m_render_api == RenderAPI::D3D9)
+  {
+    std::stringstream ss;
+    ss << "sampler2D samp0 : register(s0);\n";
+    ss << "float4 PushConstants0 : register(c32);\n\n";
+    ss << R"(
+#define SAMPLE_COUNT 31
+
+static const float OFFSETS[SAMPLE_COUNT] = {
+-29.481574788498758,
+-27.482822966811984,
+-25.48407133476425,
+-23.48531987689748,
+-21.4865685814993,
+-19.487817441187733,
+-17.4890664530808,
+-15.49031561813869,
+-13.491564939014534,
+-11.492814415362423,
+-9.49406403495946,
+-7.495313758095638,
+-5.496563491310285,
+-3.4978130444607514,
+-1.4990620619239194,
+0.4996866407382734,
+2.498437651462263,
+4.497188307705211,
+6.4959386324091755,
+8.494688887763292,
+10.493439208848661,
+12.492189658097768,
+14.490940258972138,
+16.48969101629867,
+18.48844192812288,
+20.487192992240907,
+22.485944209457497,
+24.484695584886197,
+26.48344712812872,
+28.482198852858183,
+30.0
+};
+
+static const float WEIGHTS[SAMPLE_COUNT] = {
+0.01541016258836947,
+0.017768151535171497,
+0.020283267106540014,
+0.022924205290094233,
+0.025651423266747478,
+0.02841773778937317,
+0.03116939833169751,
+0.03384762398431486,
+0.03639055836034262,
+0.03873556231203028,
+0.040821733313367456,
+0.042592516137640944,
+0.043998254731464806,
+0.0449985319608136,
+0.04556415312900511,
+0.04567825324468065,
+0.04533701597951506,
+0.04455118394212641,
+0.043343783883772295,
+0.04174984227341022,
+0.03981466909233367,
+0.03759167925377385,
+0.03513992790902628,
+0.032521509921346885,
+0.029798976743363043,
+0.027032914767164073,
+0.024279809433072556,
+0.02159029141425853,
+0.019007828077837678,
+0.016567888438120362,
+0.007421145789225499
+};
+
+float4 main(in float2 v_tex0 : TEXCOORD0) : COLOR0
+{
+  float3 result = float3(0.0f, 0.0f, 0.0f);
+  for (int i = 0; i < SAMPLE_COUNT; i++)
+  {
+    float2 offset = PushConstants0.xy * OFFSETS[i];
+    result += tex2D(samp0, v_tex0 + offset).rgb * WEIGHTS[i];
+  }
+  return float4(result, 1.0f);
+}
+)";
+    return std::move(ss).str();
+  }
+
   std::stringstream ss;
   WriteHeader(ss);
 

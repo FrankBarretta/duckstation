@@ -1362,9 +1362,24 @@ bool GPU_HW::CompilePipelines(Error* error)
     GPUPipeline::VertexAttribute::Make(4, GPUPipeline::VertexAttribute::Semantic::TexCoord, 2,
                                        GPUPipeline::VertexAttribute::Type::UNorm8, 4, OFFSETOF(BatchVertex, uv_limits)),
   };
+  static constexpr GPUPipeline::VertexAttribute d3d9_vertex_attributes[] = {
+    GPUPipeline::VertexAttribute::Make(0, GPUPipeline::VertexAttribute::Semantic::Position, 0,
+                                       GPUPipeline::VertexAttribute::Type::Float, 4, OFFSETOF(BatchVertex, x)),
+    GPUPipeline::VertexAttribute::Make(1, GPUPipeline::VertexAttribute::Semantic::Color, 0,
+                                       GPUPipeline::VertexAttribute::Type::UNorm8, 4, OFFSETOF(BatchVertex, color)),
+    GPUPipeline::VertexAttribute::Make(2, GPUPipeline::VertexAttribute::Semantic::TexCoord, 0,
+                                       GPUPipeline::VertexAttribute::Type::UInt16, 2, OFFSETOF(BatchVertex, u)),
+    GPUPipeline::VertexAttribute::Make(3, GPUPipeline::VertexAttribute::Semantic::TexCoord, 1,
+                                       GPUPipeline::VertexAttribute::Type::UInt16, 2, OFFSETOF(BatchVertex, texpage)),
+    GPUPipeline::VertexAttribute::Make(4, GPUPipeline::VertexAttribute::Semantic::TexCoord, 2,
+                                       GPUPipeline::VertexAttribute::Type::UNorm8, 4, OFFSETOF(BatchVertex, uv_limits)),
+  };
   static constexpr u32 NUM_BATCH_VERTEX_ATTRIBUTES = 2;
   static constexpr u32 NUM_BATCH_TEXTURED_VERTEX_ATTRIBUTES = 4;
   static constexpr u32 NUM_BATCH_TEXTURED_LIMITS_VERTEX_ATTRIBUTES = 5;
+  const std::span<const GPUPipeline::VertexAttribute> active_vertex_attributes =
+    (g_gpu_device->GetRenderAPI() == RenderAPI::D3D9) ? std::span<const GPUPipeline::VertexAttribute>(d3d9_vertex_attributes) :
+                                                         std::span<const GPUPipeline::VertexAttribute>(vertex_attributes);
 
   GPUPipeline::GraphicsConfig plconfig = {};
   plconfig.layout = GPUPipeline::Layout::SingleTextureAndUBO;
@@ -1444,11 +1459,9 @@ bool GPU_HW::CompilePipelines(Error* error)
                 const bool use_rov = (use_shader_blending && m_use_rov_for_shader_blend);
                 plconfig.input_layout.vertex_attributes =
                   textured ?
-                    (uv_limits ? std::span<const GPUPipeline::VertexAttribute>(
-                                   vertex_attributes, NUM_BATCH_TEXTURED_LIMITS_VERTEX_ATTRIBUTES) :
-                                 std::span<const GPUPipeline::VertexAttribute>(vertex_attributes,
-                                                                               NUM_BATCH_TEXTURED_VERTEX_ATTRIBUTES)) :
-                    std::span<const GPUPipeline::VertexAttribute>(vertex_attributes, NUM_BATCH_VERTEX_ATTRIBUTES);
+                    (uv_limits ? active_vertex_attributes.first(NUM_BATCH_TEXTURED_LIMITS_VERTEX_ATTRIBUTES) :
+                                 active_vertex_attributes.first(NUM_BATCH_TEXTURED_VERTEX_ATTRIBUTES)) :
+                    active_vertex_attributes.first(NUM_BATCH_VERTEX_ATTRIBUTES);
 
                 plconfig.vertex_shader =
                   batch_vertex_shaders[BoolToUInt8(textured)][page_texture ? 2 : BoolToUInt8(palette)]

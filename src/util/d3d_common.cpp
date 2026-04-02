@@ -610,6 +610,14 @@ std::optional<DynamicHeapArray<u8>> D3DCommon::CompileShaderWithFXC(u32 shader_m
   const char* target;
   switch (shader_model)
   {
+    case 30:
+    {
+      static constexpr std::array<const char*, static_cast<u32>(GPUShaderStage::MaxCount)> targets = {
+        {"vs_3_0", "ps_3_0", nullptr, nullptr}};
+      target = targets[static_cast<int>(stage)];
+    }
+    break;
+
     case 40:
     {
       static constexpr std::array<const char*, static_cast<u32>(GPUShaderStage::MaxCount)> targets = {
@@ -637,6 +645,13 @@ std::optional<DynamicHeapArray<u8>> D3DCommon::CompileShaderWithFXC(u32 shader_m
     default:
       Error::SetStringFmt(error, "Unknown shader model: {}", shader_model);
       return {};
+  }
+
+  if (!target)
+  {
+    Error::SetStringFmt(error, "Shader stage {} is not supported for shader model {}.",
+                        GPUShader::GetStageName(stage), shader_model);
+    return {};
   }
 
   static constexpr UINT flags_non_debug = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_OPTIMIZATION_LEVEL3;

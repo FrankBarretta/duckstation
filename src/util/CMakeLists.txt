@@ -211,6 +211,8 @@ endif()
 
 if(WIN32)
   target_sources(util PRIVATE
+    d3d9_device.cpp
+    d3d9_device.h
     d3d_common.cpp
     d3d_common.h
     d3d11_device.cpp
@@ -242,7 +244,7 @@ if(WIN32)
     xinput_source.h
   )
   target_link_libraries(util PRIVATE d3d12ma)
-  target_link_libraries(util PRIVATE Cfgmgr32.lib Dwmapi.lib winhttp.lib)
+  target_link_libraries(util PRIVATE Cfgmgr32.lib Dwmapi.lib d3d9.lib winhttp.lib)
 
   if(CMAKE_BUILD_TYPE MATCHES "Debug|Devel")
     target_link_libraries(util PRIVATE WinPixEventRuntime::WinPixEventRuntime)

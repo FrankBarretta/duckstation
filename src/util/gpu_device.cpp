@@ -31,6 +31,7 @@ LOG_CHANNEL(GPUDevice);
 
 #ifdef _WIN32
 #include "common/windows_headers.h"
+#include "d3d9_device.h"
 #include "d3d11_device.h"
 #include "d3d12_device.h"
 #include "d3d_common.h"
@@ -334,6 +335,7 @@ const char* GPUDevice::RenderAPIToString(RenderAPI api)
     // clang-format off
 #define CASE(x) case RenderAPI::x: return #x
     CASE(None);
+  CASE(D3D9);
     CASE(D3D11);
     CASE(D3D12);
     CASE(Metal);
@@ -403,6 +405,10 @@ std::optional<GPUDevice::AdapterInfoList> GPUDevice::GetAdapterListForAPI(Render
 #endif
 
 #ifdef _WIN32
+    case RenderAPI::D3D9:
+      ret = AdapterInfoList();
+      break;
+
     case RenderAPI::D3D11:
     case RenderAPI::D3D12:
       ret = D3DCommon::GetAdapterInfoList(error);
@@ -1351,6 +1357,9 @@ std::unique_ptr<GPUDevice> GPUDevice::CreateDeviceForAPI(RenderAPI api)
 #endif
 
 #ifdef _WIN32
+    case RenderAPI::D3D9:
+      return std::make_unique<D3D9Device>();
+
     case RenderAPI::D3D12:
       return std::make_unique<D3D12Device>();
 

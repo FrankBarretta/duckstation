@@ -62,6 +62,7 @@ enum class GPURenderer : u8
 {
   Automatic,
 #ifdef _WIN32
+  HardwareD3D9,
   HardwareD3D11,
   HardwareD3D12,
 #endif

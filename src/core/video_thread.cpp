@@ -860,6 +860,9 @@ bool VideoThread::CreateGPUBackendOnThread(bool hardware_renderer, bool upload_v
 
     if (!okay)
     {
+      s_state.gpu_backend.reset();
+      SetRunIdleReason(RunIdleReason::NoGPUBackend, true);
+
       if (error)
         *error = local_error;
       return false;

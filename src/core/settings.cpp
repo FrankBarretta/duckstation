@@ -1542,7 +1542,7 @@ const char* Settings::GetCPUFastmemModeDisplayName(CPUFastmemMode mode)
 static constexpr const std::array s_gpu_renderer_names = {
   "Automatic",
 #ifdef _WIN32
-  "D3D11",     "D3D12",
+  "D3D9",      "D3D11",     "D3D12",
 #endif
 #ifdef __APPLE__
   "Metal",
@@ -1558,6 +1558,7 @@ static constexpr const std::array s_gpu_renderer_names = {
 static constexpr const std::array s_gpu_renderer_display_names = {
   TRANSLATE_DISAMBIG_NOOP("Settings", "Automatic", "GPURenderer"),
 #ifdef _WIN32
+  TRANSLATE_DISAMBIG_NOOP("Settings", "Direct3D 9", "GPURenderer"),
   TRANSLATE_DISAMBIG_NOOP("Settings", "Direct3D 11", "GPURenderer"),
   TRANSLATE_DISAMBIG_NOOP("Settings", "Direct3D 12", "GPURenderer"),
 #endif
@@ -1603,6 +1604,8 @@ RenderAPI Settings::GetRenderAPIForRenderer(GPURenderer renderer)
   switch (renderer)
   {
 #ifdef _WIN32
+    case GPURenderer::HardwareD3D9:
+      return RenderAPI::D3D9;
     case GPURenderer::HardwareD3D11:
       return RenderAPI::D3D11;
     case GPURenderer::HardwareD3D12:
@@ -1632,6 +1635,9 @@ GPURenderer Settings::GetRendererForRenderAPI(RenderAPI api)
   switch (api)
   {
 #ifdef _WIN32
+    case RenderAPI::D3D9:
+      return GPURenderer::HardwareD3D9;
+
     case RenderAPI::D3D11:
       return GPURenderer::HardwareD3D11;
 

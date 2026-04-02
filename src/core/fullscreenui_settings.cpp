@@ -4155,7 +4155,8 @@ void FullscreenUI::DrawGraphicsSettingsPage()
     "Display", "DisableMailboxPresentation", false);
 
 #ifdef _WIN32
-  if (renderer == GPURenderer::HardwareD3D11 || renderer == GPURenderer::Software)
+  if (renderer == GPURenderer::HardwareD3D9 || renderer == GPURenderer::HardwareD3D11 ||
+      renderer == GPURenderer::Software)
   {
     DrawToggleSetting(
       bsi, FSUI_ICONVSTR(ICON_FA_PAINTBRUSH, "Use Blit Swap Chain"),

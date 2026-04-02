@@ -8,6 +8,7 @@
 enum class RenderAPI : u8
 {
   None,
+  D3D9,
   D3D11,
   D3D12,
   Vulkan,
