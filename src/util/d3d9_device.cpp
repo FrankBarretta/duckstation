@@ -758,6 +758,14 @@ void D3D9Device::CopyTextureRegion(GPUTexture* dst, u32 dst_x, u32 dst_y, u32 ds
     return;
   }
 
+  if (src9->IsRenderTarget() && dst9->IsRenderTarget())
+  {
+    hr = m_device->StretchRect(src9->GetD3DSurface(), &src_rect, dst9->GetD3DSurface(), &dst_rect, D3DTEXF_NONE);
+    if (FAILED(hr))
+      ERROR_LOG("D3D9Device::CopyTextureRegion() StretchRect RT->RT failed: {:08X}", static_cast<u32>(hr));
+    return;
+  }
+
   if (src9->IsRenderTarget())
   {
     ComPtr<IDirect3DSurface9> copy_source = src9->GetD3DSurface();

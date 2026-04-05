@@ -160,11 +160,13 @@ private:
   struct RTXRemixReplayDraw
   {
     u64 hash = 0;
+    u64 texture_identity = 0;
     u32 last_seen_frame = 0;
     bool use_texture = false;
     RTXRemixTextureMode texture_mode = RTXRemixTextureMode::None;
     GPUTexture* texture = nullptr;
     std::unique_ptr<GPUTexture> owned_texture; // snapshot for render-target sources
+    GSVector4i draw_rect = INVALID_RECT;
     std::array<u32, 4> uv_rect = {{0u, 0u, 255u, 255u}};
     std::array<u32, 4> texpage_info = {{0u, 0u, 0u, 0u}};
     std::array<u32, 4> texture_window = {{255u, 255u, 0u, 0u}};
